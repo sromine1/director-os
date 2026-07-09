@@ -18,26 +18,25 @@ export async function POST(request: Request) {
     const supabase = createClient(supabaseUrl, supabaseSecretKey);
 
     const { data, error } = await supabase
-      .from("directoros_emails")
+      .from("executive_briefs")
       .insert({
-        source_message_id: body.source_message_id,
-        received_at: body.received_at,
-        sender: body.sender,
-        recipients: body.recipients,
+        received_at: body.receivedAt,
+        sender: body.from,
+        recipients: body.to,
         subject: body.subject,
-        body_text: body.body_text,
-        has_attachments: body.has_attachments,
-        priority: body.priority,
-        client: body.client,
-        category: body.category,
-        deadline: body.deadline,
-        estimated_effort: body.estimated_effort,
-        executive_summary: body.executive_summary,
-        action_items: body.action_items,
-        decisions_required: body.decisions_required,
-        risks: body.risks,
-        suggested_reply: body.suggested_reply,
-        raw_ai_output: body.raw_ai_output,
+        body_text: body.body,
+        has_attachments: body.hasAttachments,
+        priority: body.analysis?.priority,
+        client: body.analysis?.client,
+        category: body.analysis?.category,
+        deadline: body.analysis?.deadline,
+        estimated_effort: body.analysis?.estimatedEffort,
+        executive_summary: body.analysis?.summary,
+        action_items: body.analysis?.actionItems?.join("\n"),
+        decisions_required: body.analysis?.decisions?.join("\n"),
+        risks: body.analysis?.risks?.join("\n"),
+        suggested_reply: body.analysis?.reply,
+        raw_ai_output: JSON.stringify(body.analysis),
       })
       .select()
       .single();
