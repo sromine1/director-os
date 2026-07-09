@@ -1,9 +1,10 @@
+import { analyzeEmail } from "@/lib/directorAi";
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
 export async function POST(request: Request) {
   try {
-    const body = await request.json();
+    const payload = await request.json();
 
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
     const supabaseSecretKey = process.env.SUPABASE_SECRET_KEY;
@@ -15,28 +16,39 @@ export async function POST(request: Request) {
       );
     }
 
+    const analysis = await analyzeEmail({
+      from: payload.from,
+      to: payload.to,
+      subject: payload.subject,
+      body: payload.body,
+      receivedAt: payload.receivedAt,
+      importance: payload.importance,
+      hasAttachments: payload.hasAttachments,
+    });
+
     const supabase = createClient(supabaseUrl, supabaseSecretKey);
 
     const { data, error } = await supabase
       .from("executive_briefs")
       .insert({
-        received_at: body.receivedAt,
-        sender: body.from,
-        recipients: body.to,
-        subject: body.subject,
-        body_text: body.body,
-        has_attachments: body.hasAttachments,
-        priority: body.analysis?.priority,
-        client: body.analysis?.client,
-        category: body.analysis?.category,
-        deadline: body.analysis?.deadline,
-        estimated_effort: body.analysis?.estimatedEffort,
-        executive_summary: body.analysis?.summary,
-        action_items: body.analysis?.actionItems?.join("\n"),
-        decisions_required: body.analysis?.decisions?.join("\n"),
-        risks: body.analysis?.risks?.join("\n"),
-        suggested_reply: body.analysis?.reply,
-        raw_ai_output: JSON.stringify(body.analysis),
+        source_message_id: payload.messageId,
+        received_at: payload.receivedAt,
+        sender: payload.from,
+        recipients: payload.to,
+        subject: payload.subject,
+        body_text: payload.body,
+        has_attachments: payload.hasAttachments,
+        priority: analysis.priority,
+        client: analysis.client,
+        category: analysis.category,
+        deadline: analysis.deadline,
+        estimated_effort: analysis.estimatedEffort,
+        executive_summary: analysis.summary,
+        action_items: analysis.actionItems?.join("\n"),
+        decisions_required: analysis.decisions?.join("\n"),
+        risks: analysis.risks?.join("\n"),
+        suggested_reply: analysis.reply,
+        raw_ai_output: JSON.stringify(analysis),
       })
       .select()
       .single();
@@ -48,10 +60,16 @@ export async function POST(request: Request) {
       );
     }
 
-    return NextResponse.json({ success: true, data });
+    return NextResponse.json({
+      success: true,
+      data,
+      analysis,
+    });
   } catch (error) {
+    console.error("Email ingestion error:", error);
+
     return NextResponse.json(
-      { error: "Invalid request" },
+      { error: "Invalid request or AI analysis failed" },
       { status: 400 }
     );
   }
