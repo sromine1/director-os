@@ -3,7 +3,7 @@ export default function Header() {
     <header className="h-20 border-b border-slate-800 bg-slate-950 flex items-center justify-between px-8">
       <div>
         <h2 className="text-2xl font-semibold text-white">
-          Today's Executive Brief
+          Today&apos;s Executive Brief
         </h2>
 
         <p className="text-slate-400">
