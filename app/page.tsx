@@ -1,6 +1,8 @@
 import AppLayout from "@/components/layout/AppLayout";
 import DashboardCard from "@/components/dashboard/DashboardCard";
+import { listRecentMessages, NylasMessage } from "@/lib/connectors/email/nylas/messages";
 import { createClient } from "@supabase/supabase-js";
+import { cookies } from "next/headers";
 import { ExecutiveEmail } from "@/types/email";
 
 type HomeProps = {
@@ -14,28 +16,47 @@ type HomeProps = {
 
 export default async function Home({ searchParams }: HomeProps) {
   const params = await searchParams;
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-  const supabaseSecretKey = process.env.SUPABASE_SECRET_KEY!;
+  const cookieStore = await cookies();
+  const grantId = cookieStore.get("nylas_grant_id")?.value;
 
-  const supabase = createClient(supabaseUrl, supabaseSecretKey);
+  let emails: ExecutiveEmail[] = [];
+  let inboxError: string | null = null;
+  let source: "nylas" | "supabase" = grantId ? "nylas" : "supabase";
 
-  const { data, error } = await supabase
-    .from("executive_briefs")
-    .select("*")
-    .order("received_at", { ascending: false })
-    .limit(20);
+  if (grantId) {
+    try {
+      const messages = await listRecentMessages(grantId, 20);
+      emails = messages.map(mapNylasMessage);
+    } catch (error) {
+      inboxError = error instanceof Error ? error.message : "Unable to load inbox messages.";
+    }
+  } else {
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+    const supabaseSecretKey = process.env.SUPABASE_SECRET_KEY!;
+    const supabase = createClient(supabaseUrl, supabaseSecretKey);
 
-  const emails: ExecutiveEmail[] =
-    data?.map((row) => ({
-      id: row.id,
-      subject: row.subject ?? "No subject",
-      sender: row.sender ?? "Unknown",
-      priority: normalizePriority(row.priority),
-      category: row.category ?? "Unclassified",
-      summary: row.executive_summary ?? "No summary available.",
-      actionRequired: Boolean(row.action_items || row.decisions_required),
-      deadline: row.deadline ?? undefined,
-    })) ?? [];
+    const { data, error } = await supabase
+      .from("executive_briefs")
+      .select("*")
+      .order("received_at", { ascending: false })
+      .limit(20);
+
+    if (error) {
+      inboxError = error.message;
+    } else {
+      emails =
+        data?.map((row) => ({
+          id: row.id,
+          subject: row.subject ?? "No subject",
+          sender: row.sender ?? "Unknown",
+          priority: normalizePriority(row.priority),
+          category: row.category ?? "Unclassified",
+          summary: row.executive_summary ?? "No summary available.",
+          actionRequired: Boolean(row.action_items || row.decisions_required),
+          deadline: row.deadline ?? undefined,
+        })) ?? [];
+    }
+  }
 
   return (
     <AppLayout>
@@ -46,25 +67,35 @@ export default async function Home({ searchParams }: HomeProps) {
               Email connections
             </p>
             <h1 className="mt-2 text-2xl font-bold text-white">
-              Connect an inbox to DirectorOS
+              {grantId ? "Inbox connected to DirectorOS" : "Connect an inbox to DirectorOS"}
             </h1>
             <p className="mt-2 max-w-2xl text-slate-300">
-              Connect Gmail or Outlook through Nylas. DirectorOS will use the connection to retrieve messages and build your executive inbox.
+              {grantId
+                ? "DirectorOS is now retrieving your 20 most recent messages directly through Nylas."
+                : "Connect Gmail or Outlook through Nylas. DirectorOS will use the connection to retrieve messages and build your executive inbox."}
             </p>
           </div>
 
           <div className="flex flex-col gap-3 sm:flex-row">
+            {grantId && (
+              <a
+                href="/"
+                className="rounded-lg border border-slate-500 px-5 py-3 text-center font-semibold text-white transition hover:bg-slate-700"
+              >
+                Refresh inbox
+              </a>
+            )}
             <a
               href="/api/auth/nylas/connect?provider=google"
               className="rounded-lg bg-white px-5 py-3 text-center font-semibold text-slate-900 transition hover:bg-slate-200"
             >
-              Connect Gmail
+              {grantId ? "Reconnect Gmail" : "Connect Gmail"}
             </a>
             <a
               href="/api/auth/nylas/connect?provider=microsoft"
               className="rounded-lg bg-blue-600 px-5 py-3 text-center font-semibold text-white transition hover:bg-blue-500"
             >
-              Connect Outlook
+              {grantId ? "Connect Outlook" : "Connect Outlook"}
             </a>
           </div>
         </div>
@@ -86,21 +117,30 @@ export default async function Home({ searchParams }: HomeProps) {
       <div className="mb-8 grid grid-cols-1 gap-6 sm:grid-cols-2 xl:grid-cols-4">
         <MetricCard title="Critical" value={countPriority(emails, "Critical")} color="text-red-400" />
         <MetricCard title="High Priority" value={countPriority(emails, "High")} color="text-orange-400" />
-        <MetricCard title="Open Decisions" value={emails.filter((e) => e.actionRequired).length} color="text-blue-400" />
-        <MetricCard title="Total Briefs" value={emails.length} color="text-green-400" />
+        <MetricCard title="Open Decisions" value={emails.filter((email) => email.actionRequired).length} color="text-blue-400" />
+        <MetricCard title={source === "nylas" ? "Recent Messages" : "Total Briefs"} value={emails.length} color="text-green-400" />
       </div>
 
-      <h2 className="mb-6 text-3xl font-bold text-white">Executive Inbox</h2>
+      <div className="mb-6 flex items-center justify-between gap-4">
+        <h2 className="text-3xl font-bold text-white">
+          {source === "nylas" ? "Connected Inbox" : "Executive Inbox"}
+        </h2>
+        {source === "nylas" && (
+          <span className="rounded-full border border-green-700 bg-green-950 px-3 py-1 text-sm text-green-200">
+            Live from Nylas
+          </span>
+        )}
+      </div>
 
-      {error && (
-        <div className="rounded-xl bg-red-950 border border-red-700 p-4 text-red-200">
-          Error loading executive briefs: {error.message}
+      {inboxError && (
+        <div className="mb-5 rounded-xl border border-red-700 bg-red-950 p-4 text-red-200">
+          Error loading {source === "nylas" ? "inbox messages" : "executive briefs"}: {inboxError}
         </div>
       )}
 
-      {!error && emails.length === 0 && (
-        <div className="rounded-xl bg-slate-800 border border-slate-700 p-6 text-slate-300">
-          No executive briefs yet.
+      {!inboxError && emails.length === 0 && (
+        <div className="rounded-xl border border-slate-700 bg-slate-800 p-6 text-slate-300">
+          {source === "nylas" ? "No messages were returned from this inbox." : "No executive briefs yet."}
         </div>
       )}
 
@@ -113,6 +153,21 @@ export default async function Home({ searchParams }: HomeProps) {
   );
 }
 
+function mapNylasMessage(message: NylasMessage): ExecutiveEmail {
+  const sender = message.from?.[0];
+  const senderLabel = sender?.name || sender?.email || "Unknown sender";
+
+  return {
+    id: message.id,
+    subject: message.subject || "No subject",
+    sender: senderLabel,
+    priority: message.starred ? "High" : "Low",
+    category: message.unread ? "Unread email" : "Email",
+    summary: message.snippet?.trim() || "Open this message to view its contents.",
+    actionRequired: false,
+  };
+}
+
 function MetricCard({
   title,
   value,
@@ -123,9 +178,9 @@ function MetricCard({
   color: string;
 }) {
   return (
-    <div className="rounded-xl bg-slate-800 border border-slate-700 p-6">
+    <div className="rounded-xl border border-slate-700 bg-slate-800 p-6">
       <p className="text-slate-400">{title}</p>
-      <p className={`text-4xl font-bold mt-3 ${color}`}>{value}</p>
+      <p className={`mt-3 text-4xl font-bold ${color}`}>{value}</p>
     </div>
   );
 }
