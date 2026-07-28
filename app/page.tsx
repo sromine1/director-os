@@ -1,6 +1,7 @@
 import AppLayout from "@/components/layout/AppLayout";
 import DashboardCard from "@/components/dashboard/DashboardCard";
 import { listRecentMessages, NylasMessage } from "@/lib/connectors/email/nylas/messages";
+import { syncNylasMessagesToSupabase } from "@/lib/connectors/email/sync";
 import { createClient } from "@supabase/supabase-js";
 import { cookies } from "next/headers";
 import { ExecutiveEmail } from "@/types/email";
@@ -18,44 +19,50 @@ export default async function Home({ searchParams }: HomeProps) {
   const params = await searchParams;
   const cookieStore = await cookies();
   const grantId = cookieStore.get("nylas_grant_id")?.value;
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+  const supabaseSecretKey =
+    process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.SUPABASE_SECRET_KEY!;
+  const supabase = createClient(supabaseUrl, supabaseSecretKey);
 
   let emails: ExecutiveEmail[] = [];
   let inboxError: string | null = null;
-  let source: "nylas" | "supabase" = grantId ? "nylas" : "supabase";
+  let syncMessage: string | null = null;
+  let liveMessages: NylasMessage[] = [];
 
   if (grantId) {
     try {
-      const messages = await listRecentMessages(grantId, 20);
-      emails = messages.map(mapNylasMessage);
+      liveMessages = await listRecentMessages(grantId, 20);
+      const result = await syncNylasMessagesToSupabase(supabase, liveMessages);
+      syncMessage = `${result.inserted} new and ${result.updated} existing messages saved to Supabase.`;
     } catch (error) {
-      inboxError = error instanceof Error ? error.message : "Unable to load inbox messages.";
+      inboxError = error instanceof Error ? error.message : "Unable to synchronize inbox messages.";
     }
+  }
+
+  const { data, error } = await supabase
+    .from("executive_briefs")
+    .select("*")
+    .order("received_at", { ascending: false })
+    .limit(20);
+
+  if (error) {
+    inboxError = inboxError ?? error.message;
   } else {
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-    const supabaseSecretKey = process.env.SUPABASE_SECRET_KEY!;
-    const supabase = createClient(supabaseUrl, supabaseSecretKey);
+    emails =
+      data?.map((row) => ({
+        id: row.id,
+        subject: row.subject ?? "No subject",
+        sender: row.sender ?? "Unknown",
+        priority: normalizePriority(row.priority),
+        category: row.category ?? "Unclassified",
+        summary: row.executive_summary ?? "No summary available.",
+        actionRequired: Boolean(row.action_items || row.decisions_required),
+        deadline: row.deadline ?? undefined,
+      })) ?? [];
+  }
 
-    const { data, error } = await supabase
-      .from("executive_briefs")
-      .select("*")
-      .order("received_at", { ascending: false })
-      .limit(20);
-
-    if (error) {
-      inboxError = error.message;
-    } else {
-      emails =
-        data?.map((row) => ({
-          id: row.id,
-          subject: row.subject ?? "No subject",
-          sender: row.sender ?? "Unknown",
-          priority: normalizePriority(row.priority),
-          category: row.category ?? "Unclassified",
-          summary: row.executive_summary ?? "No summary available.",
-          actionRequired: Boolean(row.action_items || row.decisions_required),
-          deadline: row.deadline ?? undefined,
-        })) ?? [];
-    }
+  if (emails.length === 0 && liveMessages.length > 0) {
+    emails = liveMessages.map(mapNylasMessage);
   }
 
   return (
@@ -71,8 +78,8 @@ export default async function Home({ searchParams }: HomeProps) {
             </h1>
             <p className="mt-2 max-w-2xl text-slate-300">
               {grantId
-                ? "DirectorOS is now retrieving your 20 most recent messages directly through Nylas."
-                : "Connect Gmail or Outlook through Nylas. DirectorOS will use the connection to retrieve messages and build your executive inbox."}
+                ? "DirectorOS retrieves your recent messages through Nylas and stores them in Supabase."
+                : "Connect Gmail or Outlook through Nylas. DirectorOS will retrieve and store messages for your executive inbox."}
             </p>
           </div>
 
@@ -82,7 +89,7 @@ export default async function Home({ searchParams }: HomeProps) {
                 href="/"
                 className="rounded-lg border border-slate-500 px-5 py-3 text-center font-semibold text-white transition hover:bg-slate-700"
               >
-                Refresh inbox
+                Sync inbox
               </a>
             )}
             <a
@@ -95,7 +102,7 @@ export default async function Home({ searchParams }: HomeProps) {
               href="/api/auth/nylas/connect?provider=microsoft"
               className="rounded-lg bg-blue-600 px-5 py-3 text-center font-semibold text-white transition hover:bg-blue-500"
             >
-              {grantId ? "Connect Outlook" : "Connect Outlook"}
+              Connect Outlook
             </a>
           </div>
         </div>
@@ -103,8 +110,13 @@ export default async function Home({ searchParams }: HomeProps) {
 
       {params.nylas === "connected" && (
         <div className="mb-8 rounded-xl border border-green-700 bg-green-950 p-4 text-green-200">
-          Email connected successfully
-          {params.email ? `: ${params.email}` : ""}.
+          Email connected successfully{params.email ? `: ${params.email}` : ""}.
+        </div>
+      )}
+
+      {syncMessage && !inboxError && (
+        <div className="mb-8 rounded-xl border border-green-700 bg-green-950 p-4 text-green-200">
+          Inbox synchronized: {syncMessage}
         </div>
       )}
 
@@ -118,29 +130,27 @@ export default async function Home({ searchParams }: HomeProps) {
         <MetricCard title="Critical" value={countPriority(emails, "Critical")} color="text-red-400" />
         <MetricCard title="High Priority" value={countPriority(emails, "High")} color="text-orange-400" />
         <MetricCard title="Open Decisions" value={emails.filter((email) => email.actionRequired).length} color="text-blue-400" />
-        <MetricCard title={source === "nylas" ? "Recent Messages" : "Total Briefs"} value={emails.length} color="text-green-400" />
+        <MetricCard title="Saved Messages" value={emails.length} color="text-green-400" />
       </div>
 
       <div className="mb-6 flex items-center justify-between gap-4">
-        <h2 className="text-3xl font-bold text-white">
-          {source === "nylas" ? "Connected Inbox" : "Executive Inbox"}
-        </h2>
-        {source === "nylas" && (
+        <h2 className="text-3xl font-bold text-white">Executive Inbox</h2>
+        {grantId && (
           <span className="rounded-full border border-green-700 bg-green-950 px-3 py-1 text-sm text-green-200">
-            Live from Nylas
+            Nylas → Supabase
           </span>
         )}
       </div>
 
       {inboxError && (
         <div className="mb-5 rounded-xl border border-red-700 bg-red-950 p-4 text-red-200">
-          Error loading {source === "nylas" ? "inbox messages" : "executive briefs"}: {inboxError}
+          Inbox synchronization warning: {inboxError}
         </div>
       )}
 
       {!inboxError && emails.length === 0 && (
         <div className="rounded-xl border border-slate-700 bg-slate-800 p-6 text-slate-300">
-          {source === "nylas" ? "No messages were returned from this inbox." : "No executive briefs yet."}
+          No executive inbox messages have been saved yet.
         </div>
       )}
 
