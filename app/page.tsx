@@ -11,6 +11,7 @@ import {
 import { syncNylasMessagesToSupabase } from "@/lib/connectors/email/sync";
 import { createClient } from "@supabase/supabase-js";
 import { cookies } from "next/headers";
+import Link from "next/link";
 import { ExecutiveEmail } from "@/types/email";
 
 type HomeProps = {
@@ -27,6 +28,7 @@ type BriefRow = {
   source_message_id: string | null;
   subject: string | null;
   sender: string | null;
+  recipients: string | null;
   priority: string | null;
   category: string | null;
   executive_summary: string | null;
@@ -38,9 +40,18 @@ type BriefRow = {
   raw_ai_output: unknown | null;
 };
 
+type MeetingBrief = {
+  id: string;
+  title: string;
+  organizer: string;
+  attendees: string | null;
+  startsAt: string;
+};
+
 const SYNC_MESSAGE_LIMIT = 50;
 const SYNC_EVENT_LIMIT = 50;
 const DISPLAY_BRIEF_LIMIT = 50;
+const USER_TIME_ZONE = "America/Detroit";
 
 export default async function Home({ searchParams }: HomeProps) {
   const params = await searchParams;
@@ -52,6 +63,7 @@ export default async function Home({ searchParams }: HomeProps) {
   const supabase = createClient(supabaseUrl, supabaseSecretKey);
 
   let briefs: ExecutiveEmail[] = [];
+  let todayMeetings: MeetingBrief[] = [];
   let syncError: string | null = null;
   let syncMessage: string | null = null;
   let liveItems: NylasMessage[] = [];
@@ -94,7 +106,25 @@ export default async function Home({ searchParams }: HomeProps) {
   if (error) {
     syncError = syncError ?? error.message;
   } else {
-    const prioritizedRows = ((data ?? []) as BriefRow[])
+    const rows = (data ?? []) as BriefRow[];
+
+    todayMeetings = rows
+      .filter(
+        (row) =>
+          isCalendarBrief(row.source_message_id) &&
+          row.received_at &&
+          isTodayInUserTimeZone(row.received_at),
+      )
+      .sort((a, b) => dateValue(a.received_at) - dateValue(b.received_at))
+      .map((row) => ({
+        id: row.id,
+        title: row.subject ?? "Untitled meeting",
+        organizer: row.sender ?? "Unknown organizer",
+        attendees: row.recipients,
+        startsAt: row.received_at as string,
+      }));
+
+    const prioritizedRows = rows
       .sort(compareExecutivePriority)
       .slice(0, DISPLAY_BRIEF_LIMIT);
 
@@ -200,17 +230,64 @@ export default async function Home({ searchParams }: HomeProps) {
           color="text-blue-400"
         />
         <MetricCard
-          title="Prioritized Briefs"
-          value={briefs.length}
+          title="Today's Meetings"
+          value={todayMeetings.length}
           color="text-green-400"
         />
       </div>
+
+      <section className="mb-10">
+        <div className="mb-5 flex items-end justify-between gap-4">
+          <div>
+            <h2 className="text-3xl font-bold text-white">Today&apos;s Meetings</h2>
+            <p className="mt-1 text-sm text-slate-400">
+              Meetings scheduled for today in Eastern Time.
+            </p>
+          </div>
+        </div>
+
+        {todayMeetings.length === 0 ? (
+          <div className="rounded-xl border border-slate-700 bg-slate-800 p-6 text-slate-300">
+            No meetings are scheduled for today.
+          </div>
+        ) : (
+          <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
+            {todayMeetings.map((meeting) => (
+              <Link
+                key={meeting.id}
+                href={`/briefs/${meeting.id}`}
+                className="rounded-xl border border-slate-700 bg-slate-800 p-5 transition hover:border-blue-500 hover:bg-slate-750"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <span className="rounded-full border border-blue-700 bg-blue-950 px-3 py-1 text-sm font-semibold text-blue-200">
+                    Calendar
+                  </span>
+                  <time className="font-semibold text-white">
+                    {formatMeetingTime(meeting.startsAt)}
+                  </time>
+                </div>
+                <h3 className="mt-4 text-xl font-bold text-white">
+                  {meeting.title}
+                </h3>
+                <p className="mt-2 text-sm text-slate-400">
+                  Organizer: {meeting.organizer}
+                </p>
+                {meeting.attendees && (
+                  <p className="mt-3 line-clamp-2 text-sm text-slate-300">
+                    Attendees: {meeting.attendees}
+                  </p>
+                )}
+              </Link>
+            ))}
+          </div>
+        )}
+      </section>
 
       <div className="mb-6 flex items-center justify-between gap-4">
         <div>
           <h2 className="text-3xl font-bold text-white">Executive Briefs</h2>
           <p className="mt-1 text-sm text-slate-400">
-            Gmail and Google Calendar now use the same one-table Executive Brief pipeline. Outlook uses the same flow after Microsoft connection.
+            Gmail and Google Calendar use the same one-table Executive Brief pipeline. Outlook uses the same flow after Microsoft connection.
           </p>
         </div>
         {grantId && (
@@ -327,6 +404,25 @@ function mapNylasItem(item: NylasMessage): ExecutiveEmail {
 
 function isCalendarBrief(sourceId: string | null | undefined) {
   return sourceId?.startsWith("calendar:") ?? false;
+}
+
+function isTodayInUserTimeZone(value: string) {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: USER_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+
+  return formatter.format(new Date(value)) === formatter.format(new Date());
+}
+
+function formatMeetingTime(value: string) {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: USER_TIME_ZONE,
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(value));
 }
 
 function MetricCard({
