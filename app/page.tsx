@@ -63,6 +63,7 @@ export default async function Home({ searchParams }: HomeProps) {
   const { data, error } = await supabase
     .from("executive_briefs")
     .select("*")
+    .not("source_message_id", "is", null)
     .order("received_at", { ascending: false })
     .limit(100);
 
@@ -161,7 +162,7 @@ export default async function Home({ searchParams }: HomeProps) {
         <div>
           <h2 className="text-3xl font-bold text-white">Executive Inbox</h2>
           <p className="mt-1 text-sm text-slate-400">
-            Ranked by AI importance, priority, required action, deadline, and recency.
+            Ranked by AI importance, priority, required action, deadline, and recency. Seeded test records are excluded.
           </p>
         </div>
         {grantId && (
@@ -179,7 +180,7 @@ export default async function Home({ searchParams }: HomeProps) {
 
       {!inboxError && emails.length === 0 && (
         <div className="rounded-xl border border-slate-700 bg-slate-800 p-6 text-slate-300">
-          No executive inbox messages have been saved yet.
+          No connected inbox messages have been saved yet.
         </div>
       )}
 
