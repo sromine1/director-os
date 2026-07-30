@@ -15,6 +15,24 @@ type HomeProps = {
   }>;
 };
 
+type BriefRow = {
+  id: string;
+  subject: string | null;
+  sender: string | null;
+  priority: string | null;
+  category: string | null;
+  executive_summary: string | null;
+  body_text: string | null;
+  action_items: string | null;
+  decisions_required: string | null;
+  deadline: string | null;
+  received_at: string | null;
+  raw_ai_output: unknown | null;
+};
+
+const SYNC_MESSAGE_LIMIT = 50;
+const DISPLAY_MESSAGE_LIMIT = 50;
+
 export default async function Home({ searchParams }: HomeProps) {
   const params = await searchParams;
   const cookieStore = await cookies();
@@ -31,7 +49,7 @@ export default async function Home({ searchParams }: HomeProps) {
 
   if (grantId) {
     try {
-      liveMessages = await listRecentMessages(grantId, 20);
+      liveMessages = await listRecentMessages(grantId, SYNC_MESSAGE_LIMIT);
       const result = await syncNylasMessagesToSupabase(supabase, liveMessages);
       syncMessage = `${result.inserted} new, ${result.updated} existing, and ${result.analyzed} AI-analyzed messages saved.`;
       if (result.analysisFailed > 0) {
@@ -46,26 +64,29 @@ export default async function Home({ searchParams }: HomeProps) {
     .from("executive_briefs")
     .select("*")
     .order("received_at", { ascending: false })
-    .limit(20);
+    .limit(100);
 
   if (error) {
     inboxError = inboxError ?? error.message;
   } else {
-    emails =
-      data?.map((row) => ({
-        id: row.id,
-        subject: row.subject ?? "No subject",
-        sender: row.sender ?? "Unknown",
-        priority: normalizePriority(row.priority),
-        category: row.category ?? "Awaiting AI analysis",
-        summary: row.executive_summary ?? row.body_text ?? "No summary available.",
-        actionRequired: Boolean(row.action_items || row.decisions_required),
-        deadline: row.deadline ?? undefined,
-      })) ?? [];
+    const prioritizedRows = ((data ?? []) as BriefRow[])
+      .sort(compareExecutivePriority)
+      .slice(0, DISPLAY_MESSAGE_LIMIT);
+
+    emails = prioritizedRows.map((row) => ({
+      id: row.id,
+      subject: row.subject ?? "No subject",
+      sender: row.sender ?? "Unknown",
+      priority: normalizePriority(row.priority),
+      category: row.category ?? "Awaiting AI analysis",
+      summary: row.executive_summary ?? row.body_text ?? "No summary available.",
+      actionRequired: Boolean(row.action_items || row.decisions_required),
+      deadline: row.deadline ?? undefined,
+    }));
   }
 
   if (emails.length === 0 && liveMessages.length > 0) {
-    emails = liveMessages.map(mapNylasMessage);
+    emails = liveMessages.map(mapNylasMessage).sort(compareExecutiveEmails);
   }
 
   return (
@@ -81,8 +102,8 @@ export default async function Home({ searchParams }: HomeProps) {
             </h1>
             <p className="mt-2 max-w-2xl text-slate-300">
               {grantId
-                ? "DirectorOS retrieves messages through Nylas, stores them in Supabase, and converts new emails into AI executive briefs."
-                : "Connect Gmail or Outlook through Nylas. DirectorOS will retrieve, analyze, and store messages for your executive inbox."}
+                ? "DirectorOS retrieves recent messages through Nylas, stores them in Supabase, analyzes new emails, and ranks the executive inbox by importance."
+                : "Connect Gmail or Outlook through Nylas. DirectorOS will retrieve, analyze, and prioritize messages for your executive inbox."}
             </p>
           </div>
 
@@ -133,11 +154,16 @@ export default async function Home({ searchParams }: HomeProps) {
         <MetricCard title="Critical" value={countPriority(emails, "Critical")} color="text-red-400" />
         <MetricCard title="High Priority" value={countPriority(emails, "High")} color="text-orange-400" />
         <MetricCard title="Open Decisions" value={emails.filter((email) => email.actionRequired).length} color="text-blue-400" />
-        <MetricCard title="Saved Messages" value={emails.length} color="text-green-400" />
+        <MetricCard title="Prioritized Messages" value={emails.length} color="text-green-400" />
       </div>
 
       <div className="mb-6 flex items-center justify-between gap-4">
-        <h2 className="text-3xl font-bold text-white">Executive Inbox</h2>
+        <div>
+          <h2 className="text-3xl font-bold text-white">Executive Inbox</h2>
+          <p className="mt-1 text-sm text-slate-400">
+            Ranked by AI importance, priority, required action, deadline, and recency.
+          </p>
+        </div>
         {grantId && (
           <span className="rounded-full border border-green-700 bg-green-950 px-3 py-1 text-sm text-green-200">
             Nylas → OpenAI → Supabase
@@ -164,6 +190,65 @@ export default async function Home({ searchParams }: HomeProps) {
       </div>
     </AppLayout>
   );
+}
+
+function compareExecutivePriority(a: BriefRow, b: BriefRow) {
+  const scoreDifference = getImportanceScore(b.raw_ai_output) - getImportanceScore(a.raw_ai_output);
+  if (scoreDifference !== 0) return scoreDifference;
+
+  const priorityDifference = priorityWeight(b.priority) - priorityWeight(a.priority);
+  if (priorityDifference !== 0) return priorityDifference;
+
+  const actionDifference = Number(Boolean(b.action_items || b.decisions_required)) - Number(Boolean(a.action_items || a.decisions_required));
+  if (actionDifference !== 0) return actionDifference;
+
+  const deadlineDifference = deadlineWeight(b.deadline) - deadlineWeight(a.deadline);
+  if (deadlineDifference !== 0) return deadlineDifference;
+
+  return dateValue(b.received_at) - dateValue(a.received_at);
+}
+
+function compareExecutiveEmails(a: ExecutiveEmail, b: ExecutiveEmail) {
+  return priorityWeight(b.priority) - priorityWeight(a.priority);
+}
+
+function getImportanceScore(rawAiOutput: unknown) {
+  if (!rawAiOutput || typeof rawAiOutput !== "object") return -1;
+  const score = (rawAiOutput as { importance_score?: unknown }).importance_score;
+  return typeof score === "number" && Number.isFinite(score) ? score : -1;
+}
+
+function priorityWeight(priority: string | null) {
+  switch (priority) {
+    case "Critical":
+      return 4;
+    case "High":
+      return 3;
+    case "Medium":
+      return 2;
+    case "Low":
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+function deadlineWeight(deadline: string | null) {
+  if (!deadline) return 0;
+  const deadlineTime = Date.parse(deadline);
+  if (Number.isNaN(deadlineTime)) return 1;
+
+  const hoursRemaining = (deadlineTime - Date.now()) / 3_600_000;
+  if (hoursRemaining < 0) return 4;
+  if (hoursRemaining <= 24) return 3;
+  if (hoursRemaining <= 72) return 2;
+  return 1;
+}
+
+function dateValue(value: string | null) {
+  if (!value) return 0;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? 0 : parsed;
 }
 
 function mapNylasMessage(message: NylasMessage): ExecutiveEmail {
