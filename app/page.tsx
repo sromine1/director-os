@@ -33,7 +33,10 @@ export default async function Home({ searchParams }: HomeProps) {
     try {
       liveMessages = await listRecentMessages(grantId, 20);
       const result = await syncNylasMessagesToSupabase(supabase, liveMessages);
-      syncMessage = `${result.inserted} new and ${result.updated} existing messages saved to Supabase.`;
+      syncMessage = `${result.inserted} new, ${result.updated} existing, and ${result.analyzed} AI-analyzed messages saved.`;
+      if (result.analysisFailed > 0) {
+        syncMessage += ` ${result.analysisFailed} AI analysis attempt(s) failed; check the server console.`;
+      }
     } catch (error) {
       inboxError = error instanceof Error ? error.message : "Unable to synchronize inbox messages.";
     }
@@ -54,8 +57,8 @@ export default async function Home({ searchParams }: HomeProps) {
         subject: row.subject ?? "No subject",
         sender: row.sender ?? "Unknown",
         priority: normalizePriority(row.priority),
-        category: row.category ?? "Unclassified",
-        summary: row.executive_summary ?? "No summary available.",
+        category: row.category ?? "Awaiting AI analysis",
+        summary: row.executive_summary ?? row.body_text ?? "No summary available.",
         actionRequired: Boolean(row.action_items || row.decisions_required),
         deadline: row.deadline ?? undefined,
       })) ?? [];
@@ -78,8 +81,8 @@ export default async function Home({ searchParams }: HomeProps) {
             </h1>
             <p className="mt-2 max-w-2xl text-slate-300">
               {grantId
-                ? "DirectorOS retrieves your recent messages through Nylas and stores them in Supabase."
-                : "Connect Gmail or Outlook through Nylas. DirectorOS will retrieve and store messages for your executive inbox."}
+                ? "DirectorOS retrieves messages through Nylas, stores them in Supabase, and converts new emails into AI executive briefs."
+                : "Connect Gmail or Outlook through Nylas. DirectorOS will retrieve, analyze, and store messages for your executive inbox."}
             </p>
           </div>
 
@@ -89,7 +92,7 @@ export default async function Home({ searchParams }: HomeProps) {
                 href="/"
                 className="rounded-lg border border-slate-500 px-5 py-3 text-center font-semibold text-white transition hover:bg-slate-700"
               >
-                Sync inbox
+                Sync and analyze
               </a>
             )}
             <a
@@ -137,7 +140,7 @@ export default async function Home({ searchParams }: HomeProps) {
         <h2 className="text-3xl font-bold text-white">Executive Inbox</h2>
         {grantId && (
           <span className="rounded-full border border-green-700 bg-green-950 px-3 py-1 text-sm text-green-200">
-            Nylas → Supabase
+            Nylas → OpenAI → Supabase
           </span>
         )}
       </div>
@@ -172,7 +175,7 @@ function mapNylasMessage(message: NylasMessage): ExecutiveEmail {
     subject: message.subject || "No subject",
     sender: senderLabel,
     priority: message.starred ? "High" : "Low",
-    category: message.unread ? "Unread email" : "Email",
+    category: "Awaiting AI analysis",
     summary: message.snippet?.trim() || "Open this message to view its contents.",
     actionRequired: false,
   };
