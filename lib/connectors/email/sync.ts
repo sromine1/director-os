@@ -14,6 +14,8 @@ export async function syncNylasMessagesToSupabase(
   supabase: SupabaseClient,
   messages: NylasMessage[],
 ) {
+  await removeLegacySeededBriefs(supabase);
+
   if (messages.length === 0) {
     return { inserted: 0, updated: 0, analyzed: 0, analysisFailed: 0 };
   }
@@ -102,6 +104,19 @@ export async function syncNylasMessagesToSupabase(
     analyzed,
     analysisFailed,
   };
+}
+
+async function removeLegacySeededBriefs(supabase: SupabaseClient) {
+  const { error } = await supabase
+    .from("executive_briefs")
+    .delete()
+    .eq("subject", "PowerCo Architecture Approval")
+    .ilike("sender", "%boris@diconium.com%")
+    .eq("deadline", "2026-07-10T15:00:00Z");
+
+  if (error) {
+    throw new Error(`Unable to remove legacy test messages: ${error.message}`);
+  }
 }
 
 function mapMessageToBrief(message: NylasMessage) {
