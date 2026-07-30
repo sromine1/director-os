@@ -1,6 +1,13 @@
 import AppLayout from "@/components/layout/AppLayout";
 import DashboardCard from "@/components/dashboard/DashboardCard";
-import { listRecentMessages, NylasMessage } from "@/lib/connectors/email/nylas/messages";
+import {
+  listUpcomingEvents,
+  mapEventToExecutiveBriefInput,
+} from "@/lib/connectors/calendar/nylas/events";
+import {
+  listRecentMessages,
+  NylasMessage,
+} from "@/lib/connectors/email/nylas/messages";
 import { syncNylasMessagesToSupabase } from "@/lib/connectors/email/sync";
 import { createClient } from "@supabase/supabase-js";
 import { cookies } from "next/headers";
@@ -17,6 +24,7 @@ type HomeProps = {
 
 type BriefRow = {
   id: string;
+  source_message_id: string | null;
   subject: string | null;
   sender: string | null;
   priority: string | null;
@@ -31,7 +39,8 @@ type BriefRow = {
 };
 
 const SYNC_MESSAGE_LIMIT = 50;
-const DISPLAY_MESSAGE_LIMIT = 50;
+const SYNC_EVENT_LIMIT = 50;
+const DISPLAY_BRIEF_LIMIT = 50;
 
 export default async function Home({ searchParams }: HomeProps) {
   const params = await searchParams;
@@ -42,21 +51,36 @@ export default async function Home({ searchParams }: HomeProps) {
     process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.SUPABASE_SECRET_KEY!;
   const supabase = createClient(supabaseUrl, supabaseSecretKey);
 
-  let emails: ExecutiveEmail[] = [];
-  let inboxError: string | null = null;
+  let briefs: ExecutiveEmail[] = [];
+  let syncError: string | null = null;
   let syncMessage: string | null = null;
-  let liveMessages: NylasMessage[] = [];
+  let liveItems: NylasMessage[] = [];
+  let syncedEmailCount = 0;
+  let syncedEventCount = 0;
 
   if (grantId) {
     try {
-      liveMessages = await listRecentMessages(grantId, SYNC_MESSAGE_LIMIT);
-      const result = await syncNylasMessagesToSupabase(supabase, liveMessages);
-      syncMessage = `${result.inserted} new, ${result.updated} existing, and ${result.analyzed} AI-analyzed messages saved.`;
+      const [messages, events] = await Promise.all([
+        listRecentMessages(grantId, SYNC_MESSAGE_LIMIT),
+        listUpcomingEvents(grantId, { limit: SYNC_EVENT_LIMIT }),
+      ]);
+
+      const calendarItems = events.map(mapEventToExecutiveBriefInput);
+      syncedEmailCount = messages.length;
+      syncedEventCount = calendarItems.length;
+      liveItems = [...messages, ...calendarItems];
+
+      const result = await syncNylasMessagesToSupabase(supabase, liveItems);
+      syncMessage = `${syncedEmailCount} email(s) and ${syncedEventCount} calendar event(s) retrieved; ${result.inserted} new, ${result.updated} existing, and ${result.analyzed} AI-analyzed brief(s) saved.`;
+
       if (result.analysisFailed > 0) {
         syncMessage += ` ${result.analysisFailed} AI analysis attempt(s) failed; check the server console.`;
       }
     } catch (error) {
-      inboxError = error instanceof Error ? error.message : "Unable to synchronize inbox messages.";
+      syncError =
+        error instanceof Error
+          ? error.message
+          : "Unable to synchronize email and calendar.";
     }
   }
 
@@ -68,26 +92,31 @@ export default async function Home({ searchParams }: HomeProps) {
     .limit(100);
 
   if (error) {
-    inboxError = inboxError ?? error.message;
+    syncError = syncError ?? error.message;
   } else {
     const prioritizedRows = ((data ?? []) as BriefRow[])
       .sort(compareExecutivePriority)
-      .slice(0, DISPLAY_MESSAGE_LIMIT);
+      .slice(0, DISPLAY_BRIEF_LIMIT);
 
-    emails = prioritizedRows.map((row) => ({
+    briefs = prioritizedRows.map((row) => ({
       id: row.id,
       subject: row.subject ?? "No subject",
       sender: row.sender ?? "Unknown",
       priority: normalizePriority(row.priority),
-      category: row.category ?? "Awaiting AI analysis",
-      summary: row.executive_summary ?? row.body_text ?? "No summary available.",
+      category:
+        row.category ??
+        (isCalendarBrief(row.source_message_id)
+          ? "Calendar"
+          : "Awaiting AI analysis"),
+      summary:
+        row.executive_summary ?? row.body_text ?? "No summary available.",
       actionRequired: Boolean(row.action_items || row.decisions_required),
       deadline: row.deadline ?? undefined,
     }));
   }
 
-  if (emails.length === 0 && liveMessages.length > 0) {
-    emails = liveMessages.map(mapNylasMessage).sort(compareExecutiveEmails);
+  if (briefs.length === 0 && liveItems.length > 0) {
+    briefs = liveItems.map(mapNylasItem).sort(compareExecutiveEmails);
   }
 
   return (
@@ -96,15 +125,17 @@ export default async function Home({ searchParams }: HomeProps) {
         <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
           <div>
             <p className="text-sm font-semibold uppercase tracking-wider text-blue-400">
-              Email connections
+              Connected work accounts
             </p>
             <h1 className="mt-2 text-2xl font-bold text-white">
-              {grantId ? "Inbox connected to DirectorOS" : "Connect an inbox to DirectorOS"}
+              {grantId
+                ? "Email and calendar connected to DirectorOS"
+                : "Connect email and calendar to DirectorOS"}
             </h1>
             <p className="mt-2 max-w-2xl text-slate-300">
               {grantId
-                ? "DirectorOS retrieves recent messages through Nylas, stores them in Supabase, analyzes new emails, and ranks the executive inbox by importance."
-                : "Connect Gmail or Outlook through Nylas. DirectorOS will retrieve, analyze, and prioritize messages for your executive inbox."}
+                ? "DirectorOS retrieves recent email and upcoming calendar events through Nylas, stores them as Executive Briefs in Supabase, and ranks them by importance."
+                : "Connect Gmail, Google Calendar, Outlook Email, and Outlook Calendar through Nylas."}
             </p>
           </div>
 
@@ -114,14 +145,14 @@ export default async function Home({ searchParams }: HomeProps) {
                 href="/"
                 className="rounded-lg border border-slate-500 px-5 py-3 text-center font-semibold text-white transition hover:bg-slate-700"
               >
-                Sync and analyze
+                Sync email and calendar
               </a>
             )}
             <a
               href="/api/auth/nylas/connect?provider=google"
               className="rounded-lg bg-white px-5 py-3 text-center font-semibold text-slate-900 transition hover:bg-slate-200"
             >
-              {grantId ? "Reconnect Gmail" : "Connect Gmail"}
+              {grantId ? "Reconnect Google" : "Connect Google"}
             </a>
             <a
               href="/api/auth/nylas/connect?provider=microsoft"
@@ -135,34 +166,51 @@ export default async function Home({ searchParams }: HomeProps) {
 
       {params.nylas === "connected" && (
         <div className="mb-8 rounded-xl border border-green-700 bg-green-950 p-4 text-green-200">
-          Email connected successfully{params.email ? `: ${params.email}` : ""}.
+          Account connected successfully
+          {params.email ? `: ${params.email}` : ""}. Email and calendar will sync together.
         </div>
       )}
 
-      {syncMessage && !inboxError && (
+      {syncMessage && !syncError && (
         <div className="mb-8 rounded-xl border border-green-700 bg-green-950 p-4 text-green-200">
-          Inbox synchronized: {syncMessage}
+          Synchronization complete: {syncMessage}
         </div>
       )}
 
       {params.nylas === "error" && (
         <div className="mb-8 rounded-xl border border-red-700 bg-red-950 p-4 text-red-200">
-          Email connection failed: {params.message ?? "Unknown Nylas OAuth error."}
+          Account connection failed: {params.message ?? "Unknown Nylas OAuth error."}
         </div>
       )}
 
       <div className="mb-8 grid grid-cols-1 gap-6 sm:grid-cols-2 xl:grid-cols-4">
-        <MetricCard title="Critical" value={countPriority(emails, "Critical")} color="text-red-400" />
-        <MetricCard title="High Priority" value={countPriority(emails, "High")} color="text-orange-400" />
-        <MetricCard title="Open Decisions" value={emails.filter((email) => email.actionRequired).length} color="text-blue-400" />
-        <MetricCard title="Prioritized Messages" value={emails.length} color="text-green-400" />
+        <MetricCard
+          title="Critical"
+          value={countPriority(briefs, "Critical")}
+          color="text-red-400"
+        />
+        <MetricCard
+          title="High Priority"
+          value={countPriority(briefs, "High")}
+          color="text-orange-400"
+        />
+        <MetricCard
+          title="Actions / Decisions"
+          value={briefs.filter((brief) => brief.actionRequired).length}
+          color="text-blue-400"
+        />
+        <MetricCard
+          title="Prioritized Briefs"
+          value={briefs.length}
+          color="text-green-400"
+        />
       </div>
 
       <div className="mb-6 flex items-center justify-between gap-4">
         <div>
-          <h2 className="text-3xl font-bold text-white">Executive Inbox</h2>
+          <h2 className="text-3xl font-bold text-white">Executive Briefs</h2>
           <p className="mt-1 text-sm text-slate-400">
-            Ranked by AI importance, priority, required action, deadline, and recency. Seeded test records are excluded.
+            Gmail and Google Calendar now use the same one-table Executive Brief pipeline. Outlook uses the same flow after Microsoft connection.
           </p>
         </div>
         {grantId && (
@@ -172,21 +220,21 @@ export default async function Home({ searchParams }: HomeProps) {
         )}
       </div>
 
-      {inboxError && (
+      {syncError && (
         <div className="mb-5 rounded-xl border border-red-700 bg-red-950 p-4 text-red-200">
-          Inbox synchronization warning: {inboxError}
+          Synchronization warning: {syncError}
         </div>
       )}
 
-      {!inboxError && emails.length === 0 && (
+      {!syncError && briefs.length === 0 && (
         <div className="rounded-xl border border-slate-700 bg-slate-800 p-6 text-slate-300">
-          No connected inbox messages have been saved yet.
+          No email or calendar Executive Briefs have been saved yet.
         </div>
       )}
 
       <div className="space-y-5">
-        {emails.map((email) => (
-          <DashboardCard key={email.id} email={email} />
+        {briefs.map((brief) => (
+          <DashboardCard key={brief.id} email={brief} />
         ))}
       </div>
     </AppLayout>
@@ -194,16 +242,21 @@ export default async function Home({ searchParams }: HomeProps) {
 }
 
 function compareExecutivePriority(a: BriefRow, b: BriefRow) {
-  const scoreDifference = getImportanceScore(b.raw_ai_output) - getImportanceScore(a.raw_ai_output);
+  const scoreDifference =
+    getImportanceScore(b.raw_ai_output) - getImportanceScore(a.raw_ai_output);
   if (scoreDifference !== 0) return scoreDifference;
 
-  const priorityDifference = priorityWeight(b.priority) - priorityWeight(a.priority);
+  const priorityDifference =
+    priorityWeight(b.priority) - priorityWeight(a.priority);
   if (priorityDifference !== 0) return priorityDifference;
 
-  const actionDifference = Number(Boolean(b.action_items || b.decisions_required)) - Number(Boolean(a.action_items || a.decisions_required));
+  const actionDifference =
+    Number(Boolean(b.action_items || b.decisions_required)) -
+    Number(Boolean(a.action_items || a.decisions_required));
   if (actionDifference !== 0) return actionDifference;
 
-  const deadlineDifference = deadlineWeight(b.deadline) - deadlineWeight(a.deadline);
+  const deadlineDifference =
+    deadlineWeight(b.deadline) - deadlineWeight(a.deadline);
   if (deadlineDifference !== 0) return deadlineDifference;
 
   return dateValue(b.received_at) - dateValue(a.received_at);
@@ -252,19 +305,28 @@ function dateValue(value: string | null) {
   return Number.isNaN(parsed) ? 0 : parsed;
 }
 
-function mapNylasMessage(message: NylasMessage): ExecutiveEmail {
-  const sender = message.from?.[0];
+function mapNylasItem(item: NylasMessage): ExecutiveEmail {
+  const sender = item.from?.[0];
   const senderLabel = sender?.name || sender?.email || "Unknown sender";
+  const calendarItem = isCalendarBrief(item.id);
 
   return {
-    id: message.id,
-    subject: message.subject || "No subject",
+    id: item.id,
+    subject: item.subject || (calendarItem ? "Untitled meeting" : "No subject"),
     sender: senderLabel,
-    priority: message.starred ? "High" : "Low",
-    category: "Awaiting AI analysis",
-    summary: message.snippet?.trim() || "Open this message to view its contents.",
+    priority: item.starred ? "High" : "Low",
+    category: calendarItem ? "Calendar" : "Awaiting AI analysis",
+    summary:
+      item.snippet?.trim() ||
+      (calendarItem
+        ? "Open this meeting to view its details."
+        : "Open this message to view its contents."),
     actionRequired: false,
   };
+}
+
+function isCalendarBrief(sourceId: string | null | undefined) {
+  return sourceId?.startsWith("calendar:") ?? false;
 }
 
 function MetricCard({
@@ -284,12 +346,19 @@ function MetricCard({
   );
 }
 
-function countPriority(emails: ExecutiveEmail[], priority: string) {
-  return emails.filter((email) => email.priority === priority).length;
+function countPriority(briefs: ExecutiveEmail[], priority: string) {
+  return briefs.filter((brief) => brief.priority === priority).length;
 }
 
-function normalizePriority(priority: string | null): ExecutiveEmail["priority"] {
-  if (priority === "Critical" || priority === "High" || priority === "Medium" || priority === "Low") {
+function normalizePriority(
+  priority: string | null,
+): ExecutiveEmail["priority"] {
+  if (
+    priority === "Critical" ||
+    priority === "High" ||
+    priority === "Medium" ||
+    priority === "Low"
+  ) {
     return priority;
   }
 
