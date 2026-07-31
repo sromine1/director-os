@@ -11,6 +11,7 @@ type ExistingBrief = {
 type SourceContext = {
   provider?: string;
   account?: string;
+  grantId?: string;
 };
 
 const MAX_AI_ANALYSES_PER_SYNC = 5;
@@ -132,6 +133,11 @@ function mapMessageToBrief(
   source: SourceContext,
   currentRawAiOutput?: unknown,
 ) {
+  const sourceProvider = normalizeProvider(source.provider);
+  const sourceAccount = source.account || null;
+  const sourceType = message.id.startsWith("calendar:") ? "calendar" : "email";
+  const sourceGrantId = source.grantId || null;
+
   return {
     source_message_id: message.id,
     subject: message.subject?.trim() || "No subject",
@@ -146,11 +152,16 @@ function mapMessageToBrief(
       : null,
     body_text: message.snippet?.trim() || null,
     has_attachments: false,
+    source_provider: sourceProvider,
+    source_account: sourceAccount,
+    source_type: sourceType,
+    source_grant_id: sourceGrantId,
     raw_ai_output: {
       ...asRecord(currentRawAiOutput),
-      source_provider: normalizeProvider(source.provider),
-      source_account: source.account || null,
-      source_type: message.id.startsWith("calendar:") ? "calendar" : "email",
+      source_provider: sourceProvider,
+      source_account: sourceAccount,
+      source_type: sourceType,
+      source_grant_id: sourceGrantId,
     },
   };
 }
@@ -161,6 +172,11 @@ function mapAnalysisToBrief(
   source: SourceContext,
 ) {
   const deadline = analysis.deadlines[0] || null;
+  const sourceProvider = normalizeProvider(source.provider);
+  const sourceAccount = source.account || null;
+  const sourceType = message.id.startsWith("calendar:") ? "calendar" : "email";
+  const sourceGrantId = source.grantId || null;
+
   return {
     priority: analysis.priority,
     category: analysis.category,
@@ -172,11 +188,16 @@ function mapAnalysisToBrief(
     suggested_reply: analysis.suggested_reply || null,
     estimated_effort: importanceToEffort(analysis.importance_score),
     client: analysis.organizations[0] || null,
+    source_provider: sourceProvider,
+    source_account: sourceAccount,
+    source_type: sourceType,
+    source_grant_id: sourceGrantId,
     raw_ai_output: {
       ...analysis,
-      source_provider: normalizeProvider(source.provider),
-      source_account: source.account || null,
-      source_type: message.id.startsWith("calendar:") ? "calendar" : "email",
+      source_provider: sourceProvider,
+      source_account: sourceAccount,
+      source_type: sourceType,
+      source_grant_id: sourceGrantId,
       processed_at: new Date().toISOString(),
       model: process.env.OPENAI_MODEL?.trim() || "gpt-5-mini",
     },
