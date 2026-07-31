@@ -5,6 +5,7 @@ import type { NylasMessage, NylasParticipant } from "./nylas/messages";
 type ExistingBrief = {
   id: string;
   source_message_id: string | null;
+  source_grant_id: string | null;
   raw_ai_output: unknown | null;
 };
 
@@ -30,25 +31,36 @@ export async function syncNylasMessagesToSupabase(
   const sourceMessageIds = messages.map((message) => message.id);
   const { data: existingRows, error: existingError } = await supabase
     .from("executive_briefs")
-    .select("id, source_message_id, raw_ai_output")
+    .select("id, source_message_id, source_grant_id, raw_ai_output")
     .in("source_message_id", sourceMessageIds);
 
   if (existingError) {
     throw new Error(`Unable to check saved messages: ${existingError.message}`);
   }
 
-  const existingBySourceId = new Map(
-    ((existingRows ?? []) as ExistingBrief[])
-      .filter((row) => row.source_message_id)
-      .map((row) => [row.source_message_id as string, row]),
-  );
+  const rows = (existingRows ?? []) as ExistingBrief[];
+  const existingBySourceId = new Map<string, ExistingBrief>();
+
+  for (const row of rows) {
+    if (!row.source_message_id) continue;
+    const exactKey = briefKey(row.source_message_id, row.source_grant_id ?? undefined);
+    existingBySourceId.set(exactKey, row);
+
+    // Older records did not have a grant ID. Keep this fallback so a sync can
+    // upgrade those rows instead of inserting duplicates.
+    if (!row.source_grant_id) {
+      existingBySourceId.set(row.source_message_id, row);
+    }
+  }
 
   const inserts = [];
   const updates = [];
   const analysisCandidates: NylasMessage[] = [];
 
   for (const message of messages) {
-    const existing = existingBySourceId.get(message.id);
+    const existing =
+      existingBySourceId.get(briefKey(message.id, source.grantId)) ??
+      existingBySourceId.get(message.id);
     const record = mapMessageToBrief(message, source, existing?.raw_ai_output);
 
     if (existing) {
@@ -95,7 +107,8 @@ export async function syncNylasMessagesToSupabase(
       const { error: analysisError } = await supabase
         .from("executive_briefs")
         .update(mapAnalysisToBrief(analysis, message, source))
-        .eq("source_message_id", message.id);
+        .eq("source_message_id", message.id)
+        .eq("source_grant_id", source.grantId ?? "");
 
       if (analysisError) {
         throw new Error(analysisError.message);
@@ -119,9 +132,8 @@ async function removeLegacySeededBriefs(supabase: SupabaseClient) {
   const { error } = await supabase
     .from("executive_briefs")
     .delete()
-    .eq("subject", "PowerCo Architecture Approval")
-    .ilike("sender", "%boris@diconium.com%")
-    .eq("deadline", "2026-07-10T15:00:00Z");
+    .is("source_message_id", null)
+    .in("subject", ["PowerCo Architecture Approval", "PowerCo Test"]);
 
   if (error) {
     throw new Error(`Unable to remove legacy test messages: ${error.message}`);
@@ -133,13 +145,15 @@ function mapMessageToBrief(
   source: SourceContext,
   currentRawAiOutput?: unknown,
 ) {
-  const sourceProvider = normalizeProvider(source.provider);
-  const sourceAccount = source.account || null;
+  const provider = normalizeProvider(source.provider);
   const sourceType = message.id.startsWith("calendar:") ? "calendar" : "email";
-  const sourceGrantId = source.grantId || null;
 
   return {
     source_message_id: message.id,
+    source_provider: provider,
+    source_account: source.account || null,
+    source_type: sourceType,
+    source_grant_id: source.grantId || null,
     subject: message.subject?.trim() || "No subject",
     sender: formatParticipant(message.from?.[0], "Unknown sender"),
     recipients:
@@ -152,16 +166,12 @@ function mapMessageToBrief(
       : null,
     body_text: message.snippet?.trim() || null,
     has_attachments: false,
-    source_provider: sourceProvider,
-    source_account: sourceAccount,
-    source_type: sourceType,
-    source_grant_id: sourceGrantId,
     raw_ai_output: {
       ...asRecord(currentRawAiOutput),
-      source_provider: sourceProvider,
-      source_account: sourceAccount,
+      source_provider: provider,
+      source_account: source.account || null,
       source_type: sourceType,
-      source_grant_id: sourceGrantId,
+      source_grant_id: source.grantId || null,
     },
   };
 }
@@ -172,12 +182,14 @@ function mapAnalysisToBrief(
   source: SourceContext,
 ) {
   const deadline = analysis.deadlines[0] || null;
-  const sourceProvider = normalizeProvider(source.provider);
-  const sourceAccount = source.account || null;
+  const provider = normalizeProvider(source.provider);
   const sourceType = message.id.startsWith("calendar:") ? "calendar" : "email";
-  const sourceGrantId = source.grantId || null;
 
   return {
+    source_provider: provider,
+    source_account: source.account || null,
+    source_type: sourceType,
+    source_grant_id: source.grantId || null,
     priority: analysis.priority,
     category: analysis.category,
     executive_summary: analysis.executive_summary,
@@ -188,23 +200,34 @@ function mapAnalysisToBrief(
     suggested_reply: analysis.suggested_reply || null,
     estimated_effort: importanceToEffort(analysis.importance_score),
     client: analysis.organizations[0] || null,
-    source_provider: sourceProvider,
-    source_account: sourceAccount,
-    source_type: sourceType,
-    source_grant_id: sourceGrantId,
     raw_ai_output: {
       ...analysis,
-      source_provider: sourceProvider,
-      source_account: sourceAccount,
+      source_provider: provider,
+      source_account: source.account || null,
       source_type: sourceType,
-      source_grant_id: sourceGrantId,
+      source_grant_id: source.grantId || null,
       processed_at: new Date().toISOString(),
       model: process.env.OPENAI_MODEL?.trim() || "gpt-5-mini",
     },
   };
 }
 
+function briefKey(sourceMessageId: string, grantId?: string) {
+  return grantId ? `${grantId}:${sourceMessageId}` : sourceMessageId;
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : {};
+    } catch {
+      return {};
+    }
+  }
+
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
