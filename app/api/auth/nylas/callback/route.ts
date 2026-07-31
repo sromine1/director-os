@@ -60,9 +60,10 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    const provider = normalizeProvider(tokenData.provider);
     redirectUrl.searchParams.set("nylas", "connected");
     if (tokenData.email) redirectUrl.searchParams.set("email", tokenData.email);
-    if (tokenData.provider) redirectUrl.searchParams.set("provider", tokenData.provider);
+    redirectUrl.searchParams.set("provider", provider);
 
     const response = clearStateAndRedirect(redirectUrl);
     const cookieOptions = {
@@ -73,9 +74,15 @@ export async function GET(request: NextRequest) {
       path: "/",
     };
 
+    // Keep the most recently connected grant for backward compatibility.
     response.cookies.set("nylas_grant_id", tokenData.grant_id, cookieOptions);
     response.cookies.set("nylas_account_email", tokenData.email ?? "", cookieOptions);
-    response.cookies.set("nylas_account_provider", tokenData.provider ?? "unknown", cookieOptions);
+    response.cookies.set("nylas_account_provider", provider, cookieOptions);
+
+    // Provider-specific cookies let DirectorOS keep Google and Microsoft
+    // connected simultaneously without adding another database table yet.
+    response.cookies.set(`nylas_${provider}_grant_id`, tokenData.grant_id, cookieOptions);
+    response.cookies.set(`nylas_${provider}_account_email`, tokenData.email ?? "", cookieOptions);
 
     return response;
   } catch (error) {
@@ -86,6 +93,13 @@ export async function GET(request: NextRequest) {
     );
     return clearStateAndRedirect(redirectUrl);
   }
+}
+
+function normalizeProvider(provider?: string) {
+  const value = provider?.toLowerCase() ?? "unknown";
+  if (value.includes("google")) return "google";
+  if (value.includes("microsoft") || value.includes("outlook")) return "microsoft";
+  return "unknown";
 }
 
 function clearStateAndRedirect(url: URL) {
