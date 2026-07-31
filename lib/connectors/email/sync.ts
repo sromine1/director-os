@@ -47,8 +47,8 @@ export async function syncNylasMessagesToSupabase(
   const analysisCandidates: NylasMessage[] = [];
 
   for (const message of messages) {
-    const record = mapMessageToBrief(message);
     const existing = existingBySourceId.get(message.id);
+    const record = mapMessageToBrief(message, source, existing?.raw_ai_output);
 
     if (existing) {
       updates.push(
@@ -57,7 +57,9 @@ export async function syncNylasMessagesToSupabase(
           .update(record)
           .eq("id", existing.id),
       );
-      if (!existing.raw_ai_output) analysisCandidates.push(message);
+      if (!hasExecutiveAnalysis(existing.raw_ai_output)) {
+        analysisCandidates.push(message);
+      }
     } else {
       inserts.push(record);
       analysisCandidates.push(message);
@@ -125,7 +127,11 @@ async function removeLegacySeededBriefs(supabase: SupabaseClient) {
   }
 }
 
-function mapMessageToBrief(message: NylasMessage) {
+function mapMessageToBrief(
+  message: NylasMessage,
+  source: SourceContext,
+  currentRawAiOutput?: unknown,
+) {
   return {
     source_message_id: message.id,
     subject: message.subject?.trim() || "No subject",
@@ -140,6 +146,12 @@ function mapMessageToBrief(message: NylasMessage) {
       : null,
     body_text: message.snippet?.trim() || null,
     has_attachments: false,
+    raw_ai_output: {
+      ...asRecord(currentRawAiOutput),
+      source_provider: normalizeProvider(source.provider),
+      source_account: source.account || null,
+      source_type: message.id.startsWith("calendar:") ? "calendar" : "email",
+    },
   };
 }
 
@@ -169,6 +181,17 @@ function mapAnalysisToBrief(
       model: process.env.OPENAI_MODEL?.trim() || "gpt-5-mini",
     },
   };
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function hasExecutiveAnalysis(value: unknown) {
+  const record = asRecord(value);
+  return typeof record.importance_score === "number";
 }
 
 function normalizeProvider(provider?: string) {
