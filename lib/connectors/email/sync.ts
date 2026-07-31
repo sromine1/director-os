@@ -8,11 +8,17 @@ type ExistingBrief = {
   raw_ai_output: unknown | null;
 };
 
+type SourceContext = {
+  provider?: string;
+  account?: string;
+};
+
 const MAX_AI_ANALYSES_PER_SYNC = 5;
 
 export async function syncNylasMessagesToSupabase(
   supabase: SupabaseClient,
   messages: NylasMessage[],
+  source: SourceContext = {},
 ) {
   await removeLegacySeededBriefs(supabase);
 
@@ -85,7 +91,7 @@ export async function syncNylasMessagesToSupabase(
       const analysis = await analyzeMessageForExecutiveBrief(message);
       const { error: analysisError } = await supabase
         .from("executive_briefs")
-        .update(mapAnalysisToBrief(analysis))
+        .update(mapAnalysisToBrief(analysis, message, source))
         .eq("source_message_id", message.id);
 
       if (analysisError) {
@@ -139,6 +145,8 @@ function mapMessageToBrief(message: NylasMessage) {
 
 function mapAnalysisToBrief(
   analysis: Awaited<ReturnType<typeof analyzeMessageForExecutiveBrief>>,
+  message: NylasMessage,
+  source: SourceContext,
 ) {
   const deadline = analysis.deadlines[0] || null;
   return {
@@ -154,10 +162,22 @@ function mapAnalysisToBrief(
     client: analysis.organizations[0] || null,
     raw_ai_output: {
       ...analysis,
+      source_provider: normalizeProvider(source.provider),
+      source_account: source.account || null,
+      source_type: message.id.startsWith("calendar:") ? "calendar" : "email",
       processed_at: new Date().toISOString(),
       model: process.env.OPENAI_MODEL?.trim() || "gpt-5-mini",
     },
   };
+}
+
+function normalizeProvider(provider?: string) {
+  const normalized = provider?.toLowerCase() ?? "unknown";
+  if (normalized.includes("google")) return "google";
+  if (normalized.includes("microsoft") || normalized.includes("outlook")) {
+    return "microsoft";
+  }
+  return normalized;
 }
 
 function joinItems(items: string[]) {
