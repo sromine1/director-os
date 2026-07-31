@@ -7,4 +7,8 @@ export interface ExecutiveEmail {
   summary: string;
   actionRequired: boolean;
   deadline?: string;
+  sourceProvider?: "google" | "microsoft" | "unknown";
+  sourceAccount?: string;
+  sourceType?: "email" | "calendar";
+  executiveScore?: number;
 }
