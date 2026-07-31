@@ -65,13 +65,17 @@ export async function GET(request: NextRequest) {
     if (tokenData.provider) redirectUrl.searchParams.set("provider", tokenData.provider);
 
     const response = clearStateAndRedirect(redirectUrl);
-    response.cookies.set("nylas_grant_id", tokenData.grant_id, {
+    const cookieOptions = {
       httpOnly: true,
-      sameSite: "lax",
+      sameSite: "lax" as const,
       secure: process.env.NODE_ENV === "production",
       maxAge: 60 * 60 * 24 * 30,
       path: "/",
-    });
+    };
+
+    response.cookies.set("nylas_grant_id", tokenData.grant_id, cookieOptions);
+    response.cookies.set("nylas_account_email", tokenData.email ?? "", cookieOptions);
+    response.cookies.set("nylas_account_provider", tokenData.provider ?? "unknown", cookieOptions);
 
     return response;
   } catch (error) {
