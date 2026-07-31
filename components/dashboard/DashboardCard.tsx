@@ -7,7 +7,8 @@ type Props = {
 };
 
 export default function DashboardCard({ email }: Props) {
-  const isCalendar = email.category === "Calendar";
+  const isCalendar = email.sourceType === "calendar" || email.category === "Calendar";
+  const sourceLabel = getSourceLabel(email.sourceProvider, isCalendar);
 
   return (
     <Link
@@ -16,16 +17,25 @@ export default function DashboardCard({ email }: Props) {
     >
       <div className="mb-2 flex items-start justify-between gap-4">
         <div>
-          <span className="mb-2 inline-flex rounded-full border border-slate-600 bg-slate-900 px-2.5 py-1 text-xs font-semibold text-slate-300">
-            {isCalendar ? "Calendar" : "Email"}
-          </span>
+          <div className="mb-2 flex flex-wrap items-center gap-2">
+            <span className="inline-flex rounded-full border border-slate-600 bg-slate-900 px-2.5 py-1 text-xs font-semibold text-slate-300">
+              {sourceLabel}
+            </span>
+            {email.sourceAccount && (
+              <span className="text-xs text-slate-400">{email.sourceAccount}</span>
+            )}
+            {typeof email.executiveScore === "number" && (
+              <span className="text-xs text-slate-500">
+                Relevance {email.executiveScore}/100
+              </span>
+            )}
+          </div>
           <h2 className="font-bold text-white">{email.subject}</h2>
         </div>
         <PriorityBadge priority={email.priority} />
       </div>
 
       <p className="text-sm text-slate-400">{email.sender}</p>
-
       <p className="mt-3 text-slate-300">{email.summary}</p>
 
       {email.deadline && (
@@ -35,4 +45,13 @@ export default function DashboardCard({ email }: Props) {
       )}
     </Link>
   );
+}
+
+function getSourceLabel(
+  provider: ExecutiveEmail["sourceProvider"],
+  isCalendar: boolean,
+) {
+  if (provider === "google") return isCalendar ? "Google Calendar" : "Gmail";
+  if (provider === "microsoft") return isCalendar ? "Outlook Calendar" : "Outlook";
+  return isCalendar ? "Calendar" : "Email";
 }
