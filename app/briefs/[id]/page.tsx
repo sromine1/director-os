@@ -1,122 +1,125 @@
-import { createClient } from "@supabase/supabase-js";
+import BriefMetadata from "@/components/briefs/BriefMetadata";
+import BriefSection from "@/components/briefs/BriefSection";
+import PriorityBadge from "@/components/dashboard/PriorityBadge";
+import { formatBriefDate, getBriefAiMetadata, isMeetingBrief, type BriefDetail, type RelatedBrief } from "@/lib/executive-brief-detail";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import Link from "next/link";
+import { notFound } from "next/navigation";
 
-interface PageProps {
-  params: Promise<{
-    id: string;
-  }>;
-}
-
-export default async function BriefPage({ params }: PageProps) {
-  const { id } = await params;
-
+export default async function BriefPage(props: PageProps<"/briefs/[id]">) {
+  const { id } = await props.params;
   const supabase = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SECRET_KEY!
+    process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.SUPABASE_SECRET_KEY!,
   );
+  const { data, error } = await supabase.from("executive_briefs").select("*").eq("id", id).maybeSingle();
 
-  const { data: brief } = await supabase
-    .from("executive_briefs")
-    .select("*")
-    .eq("id", id)
-    .single();
+  if (error) throw new Error(`Unable to load executive brief: ${error.message}`);
+  if (!data) notFound();
 
-  if (!brief) {
-    return (
-      <div className="p-12 text-white">
-        Brief not found.
-      </div>
-    );
-  }
+  const brief = data as BriefDetail;
+  const ai = getBriefAiMetadata(brief.raw_ai_output);
+  const related = await loadRelatedBriefs(supabase, brief);
+  const meeting = isMeetingBrief(brief);
 
   return (
-    <main className="min-h-screen bg-slate-950 text-white p-10">
-      <Link
-        href="/"
-        className="text-blue-400 hover:underline"
-      >
-        ← Back to Dashboard
-      </Link>
+    <main className="min-h-screen bg-slate-950 px-5 py-8 text-white sm:px-8 lg:px-12">
+      <div className="mx-auto max-w-7xl">
+        <Link href="/" className="text-sm font-semibold text-blue-400 hover:text-blue-300">← Back to dashboard</Link>
 
-      <div className="mt-8 max-w-5xl">
+        <header className="mt-8 border-b border-slate-800 pb-8">
+          <div className="flex flex-wrap items-center gap-3">
+            <PriorityBadge priority={brief.priority ?? "Low"} />
+            <span className="rounded-full border border-slate-700 px-3 py-1 text-xs text-slate-300">
+              {brief.category || (meeting ? "Meeting" : "Email")}
+            </span>
+            <span className="text-sm text-slate-500">{formatBriefDate(brief.received_at)}</span>
+          </div>
+          <h1 className="mt-5 max-w-5xl text-3xl font-bold tracking-tight sm:text-4xl">
+            {brief.subject || (meeting ? "Untitled meeting" : "No subject")}
+          </h1>
+          {brief.client && <p className="mt-3 text-slate-400">{brief.client}</p>}
+          {brief.web_link && (
+            <a href={brief.web_link} target="_blank" rel="noreferrer" className="mt-5 inline-flex rounded-lg border border-slate-700 px-4 py-2 text-sm font-semibold text-slate-200 hover:border-blue-500 hover:text-white">
+              Open original
+            </a>
+          )}
+        </header>
 
-        <div className="flex items-center gap-4">
-
-          <span className="rounded-full bg-red-600 px-4 py-1 font-semibold">
-            {brief.priority}
-          </span>
-
-          <span className="text-slate-400">
-            {brief.client}
-          </span>
-
-          <span className="text-slate-500">
-            {brief.category}
-          </span>
-
+        <div className="mt-8 grid gap-8 xl:grid-cols-[minmax(0,1fr)_320px]">
+          <div className="space-y-6">
+            <BriefSection title="Executive summary" content={brief.executive_summary} emptyLabel="This item has not been summarized yet." />
+            <BriefSection title={meeting ? "Meeting description" : "Original email"} content={brief.body_text} emptyLabel={meeting ? "No meeting description was captured." : "No email body was captured."} />
+            <div className="grid gap-6 lg:grid-cols-2">
+              <BriefSection title="Action items" content={brief.action_items} />
+              <BriefSection title="Decisions required" content={brief.decisions_required} />
+              <BriefSection title="Risks" content={brief.risks} />
+              <BriefSection title="Suggested reply" content={brief.suggested_reply} />
+            </div>
+            <BriefSection title="AI reasoning" content={ai.urgencyReason ?? ai.suppressionReason} emptyLabel="No AI reasoning was recorded for this item." />
+            <IntelligenceEntities ai={ai} />
+            <RelatedItems items={related} />
+          </div>
+          <BriefMetadata brief={brief} ai={ai} />
         </div>
-
-        <h1 className="text-5xl font-bold mt-6">
-          {brief.subject}
-        </h1>
-
-        <div className="mt-10 rounded-xl bg-slate-900 p-8">
-
-          <h2 className="text-2xl font-semibold mb-4">
-            Executive Summary
-          </h2>
-
-          <p className="text-slate-300 whitespace-pre-wrap">
-            {brief.executive_summary}
-          </p>
-
-        </div>
-
-        <div className="grid grid-cols-2 gap-6 mt-8">
-
-          <Section
-            title="Action Items"
-            content={brief.action_items}
-          />
-
-          <Section
-            title="Decisions Required"
-            content={brief.decisions_required}
-          />
-
-          <Section
-            title="Risks"
-            content={brief.risks}
-          />
-
-          <Section
-            title="Suggested Reply"
-            content={brief.suggested_reply}
-          />
-
-        </div>
-
       </div>
     </main>
   );
 }
 
-function Section({
-  title,
-  content,
-}: {
-  title: string;
-  content: string | null;
-}) {
-  return (
-    <div className="rounded-xl bg-slate-900 p-6">
-      <h3 className="text-xl font-semibold mb-3">
-        {title}
-      </h3>
+async function loadRelatedBriefs(supabase: SupabaseClient, brief: BriefDetail) {
+  let query = supabase.from("executive_briefs").select("id, subject, priority, received_at, source_type").neq("id", brief.id).order("received_at", { ascending: false }).limit(4);
 
-      <div className="whitespace-pre-wrap text-slate-300">
-        {content || "None"}
-      </div>
-    </div>
+  if (brief.client) query = query.eq("client", brief.client);
+  else if (brief.source_account) query = query.eq("source_account", brief.source_account);
+  else if (brief.source_provider) query = query.eq("source_provider", brief.source_provider);
+  else return [];
+
+  const { data } = await query;
+  return (data ?? []) as RelatedBrief[];
+}
+
+function IntelligenceEntities({ ai }: { ai: ReturnType<typeof getBriefAiMetadata> }) {
+  const groups = [["People", ai.people], ["Organizations", ai.organizations], ["Projects", ai.projects]] as const;
+  const hasEntities = groups.some(([, values]) => values.length > 0);
+
+  return (
+    <section className="rounded-xl border border-slate-800 bg-slate-900 p-6">
+      <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-400">Intelligence context</h2>
+      {!hasEntities ? (
+        <p className="mt-4 text-sm text-slate-400">No people, organizations, or projects were identified.</p>
+      ) : (
+        <div className="mt-5 grid gap-5 sm:grid-cols-3">
+          {groups.map(([label, values]) => values.length > 0 && (
+            <div key={label}>
+              <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</h3>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {values.map((value) => <span key={value} className="rounded-full bg-slate-800 px-3 py-1 text-xs text-slate-200">{value}</span>)}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function RelatedItems({ items }: { items: RelatedBrief[] }) {
+  return (
+    <section className="rounded-xl border border-slate-800 bg-slate-900 p-6">
+      <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-400">Related items</h2>
+      {items.length === 0 ? (
+        <p className="mt-4 text-sm text-slate-400">No related items were found for this client or account.</p>
+      ) : (
+        <div className="mt-4 divide-y divide-slate-800">
+          {items.map((item) => (
+            <Link key={item.id} href={`/briefs/${item.id}`} className="flex items-center justify-between gap-4 py-4 hover:text-blue-300">
+              <div><p className="font-medium">{item.subject || "Untitled item"}</p><p className="mt-1 text-xs text-slate-500">{formatBriefDate(item.received_at)}</p></div>
+              <span className="text-xs text-slate-500">{item.source_type === "calendar" ? "Meeting" : item.priority || "Brief"}</span>
+            </Link>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }

@@ -22,6 +22,7 @@ export type NylasEvent = {
   location?: string;
   conferencing?: unknown;
   status?: string;
+  html_link?: string;
 };
 
 type NylasEventsResponse = {
@@ -106,6 +107,7 @@ export function mapEventToExecutiveBriefInput(event: NylasEvent): NylasMessage {
     date: start ? Math.floor(start.getTime() / 1000) : undefined,
     from: [organizer],
     to: participants,
+    webLink: event.html_link,
   };
 }
 

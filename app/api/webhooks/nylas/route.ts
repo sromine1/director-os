@@ -1,6 +1,13 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import {
+  getNylasMessage,
+  isSpamMessage,
+  listJunkFolderIds,
+  type NylasMessage,
+} from "@/lib/connectors/email/nylas/messages";
+import { syncNylasMessagesToSupabase } from "@/lib/connectors/email/sync";
 
 export const runtime = "nodejs";
 
@@ -27,6 +34,8 @@ type NylasObject = {
   creator?: Participant;
   organizer?: Participant;
   participants?: Participant[];
+  folders?: string[];
+  html_link?: string;
   when?: {
     object?: string;
     start_time?: number;
@@ -159,100 +168,58 @@ async function processNotification(notification: NylasWebhook) {
     return;
   }
 
-  const record =
-    sourceType === "calendar"
-      ? mapCalendarRecord(object, provider, sourceAccount, grantId, notification)
-      : mapMessageRecord(object, provider, sourceAccount, grantId, notification);
+  let item: NylasMessage;
+  if (sourceType === "email") {
+    const [message, junkFolderIds] = await Promise.all([
+      getNylasMessage(grantId, objectId),
+      listJunkFolderIds(grantId),
+    ]);
 
-  const { data: existing, error: lookupError } = await supabase
-    .from("executive_briefs")
-    .select("id")
-    .eq("source_message_id", sourceMessageId)
-    .eq("source_grant_id", grantId)
-    .maybeSingle();
+    if (isSpamMessage(message, junkFolderIds)) {
+      const { error } = await supabase
+        .from("executive_briefs")
+        .delete()
+        .eq("source_message_id", sourceMessageId)
+        .eq("source_grant_id", grantId);
+      if (error) throw new Error(`Unable to remove spam brief: ${error.message}`);
+      return;
+    }
 
-  if (lookupError) {
-    throw new Error(`Unable to locate webhook item: ${lookupError.message}`);
-  }
-
-  if (existing?.id) {
-    const { error } = await supabase
-      .from("executive_briefs")
-      .update(record)
-      .eq("id", existing.id);
-    if (error) throw new Error(`Unable to update webhook item: ${error.message}`);
+    item = message;
   } else {
-    const { error } = await supabase.from("executive_briefs").insert(record);
-    if (error) throw new Error(`Unable to insert webhook item: ${error.message}`);
+    item = mapWebhookEvent(object, notification.time);
   }
+
+  await syncNylasMessagesToSupabase(supabase, [item], {
+    provider,
+    account: sourceAccount ?? undefined,
+    grantId,
+    reanalyze: eventType.endsWith(".updated"),
+  });
 }
 
-function mapMessageRecord(
+function mapWebhookEvent(
   object: NylasObject,
-  provider: string,
-  account: string | null,
-  grantId: string,
-  notification: NylasWebhook,
-) {
+  fallbackTime?: number,
+): NylasMessage {
+  const organizer = object.organizer ?? object.creator;
+  const description = object.description?.trim();
   return {
-    source_message_id: object.id,
-    source_provider: provider,
-    source_account: account,
-    source_type: "email",
-    source_grant_id: grantId,
-    subject: object.subject?.trim() || "No subject",
-    sender: formatParticipant(object.from?.[0], "Unknown sender"),
-    recipients: formatParticipants(object.to),
-    received_at: toIso(object.date ?? object.created_at ?? notification.time),
-    body_text: cleanText(object.snippet ?? object.body),
-    raw_ai_output: JSON.stringify({
-      webhook_pending_analysis: true,
-      webhook_event_type: notification.type,
-      webhook_id: notification.id,
-      source_provider: provider,
-      source_account: account,
-      source_type: "email",
-      source_grant_id: grantId,
-    }),
-  };
-}
-
-function mapCalendarRecord(
-  object: NylasObject,
-  provider: string,
-  account: string | null,
-  grantId: string,
-  notification: NylasWebhook,
-) {
-  return {
-    source_message_id: `calendar:${object.id}`,
-    source_provider: provider,
-    source_account: account,
-    source_type: "calendar",
-    source_grant_id: grantId,
+    id: `calendar:${object.id}`,
     subject: object.title?.trim() || "Untitled meeting",
-    sender: formatParticipant(
-      object.organizer ?? object.creator,
-      "Calendar",
-    ),
-    recipients: formatParticipants(object.participants),
-    received_at: toIso(eventStart(object) ?? notification.time),
-    body_text: cleanText(object.description),
-    category: "Calendar",
-    raw_ai_output: JSON.stringify({
-      webhook_pending_analysis: true,
-      webhook_event_type: notification.type,
-      webhook_id: notification.id,
-      source_provider: provider,
-      source_account: account,
-      source_type: "calendar",
-      source_grant_id: grantId,
-    }),
+    snippet: description || "Calendar event",
+    date: eventStart(object) ?? fallbackTime,
+    from: organizer ? [{ name: organizer.name, email: organizer.email }] : [],
+    to: object.participants?.map((participant) => ({
+      name: participant.name,
+      email: participant.email,
+    })),
+    webLink: object.html_link,
   };
 }
 
 async function findSourceAccount(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SupabaseClient,
   grantId: string,
 ) {
   const { data } = await supabase
@@ -294,38 +261,4 @@ function eventStart(object: NylasObject) {
   if (when.start_date) return Date.parse(`${when.start_date}T00:00:00Z`) / 1000;
   if (when.date) return Date.parse(`${when.date}T00:00:00Z`) / 1000;
   return object.created_at;
-}
-
-function toIso(timestamp?: number) {
-  if (!timestamp || !Number.isFinite(timestamp)) return null;
-  return new Date(timestamp * 1000).toISOString();
-}
-
-function formatParticipant(participant: Participant | undefined, fallback: string) {
-  if (!participant) return fallback;
-  if (participant.name && participant.email) {
-    return `${participant.name} <${participant.email}>`;
-  }
-  return participant.name || participant.email || fallback;
-}
-
-function formatParticipants(participants?: Participant[]) {
-  const value = (participants ?? [])
-    .map((participant) => formatParticipant(participant, ""))
-    .filter(Boolean)
-    .join(", ");
-  return value || null;
-}
-
-function cleanText(value?: string) {
-  if (!value) return null;
-  return value
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 12000) || null;
 }

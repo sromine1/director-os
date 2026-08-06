@@ -13,6 +13,7 @@ type SourceContext = {
   provider?: string;
   account?: string;
   grantId?: string;
+  reanalyze?: boolean;
 };
 
 const MAX_AI_ANALYSES_PER_SYNC = 5;
@@ -70,7 +71,7 @@ export async function syncNylasMessagesToSupabase(
           .update(record)
           .eq("id", existing.id),
       );
-      if (!hasExecutiveAnalysis(existing.raw_ai_output)) {
+      if (source.reanalyze || !hasExecutiveAnalysis(existing.raw_ai_output)) {
         analysisCandidates.push(message);
       }
     } else {
@@ -104,11 +105,16 @@ export async function syncNylasMessagesToSupabase(
   for (const message of analysisCandidates.slice(0, MAX_AI_ANALYSES_PER_SYNC)) {
     try {
       const analysis = await analyzeMessageForExecutiveBrief(message);
-      const { error: analysisError } = await supabase
+      let query = supabase
         .from("executive_briefs")
         .update(mapAnalysisToBrief(analysis, message, source))
-        .eq("source_message_id", message.id)
-        .eq("source_grant_id", source.grantId ?? "");
+        .eq("source_message_id", message.id);
+
+      if (source.grantId) {
+        query = query.eq("source_grant_id", source.grantId);
+      }
+
+      const { error: analysisError } = await query;
 
       if (analysisError) {
         throw new Error(analysisError.message);
@@ -166,6 +172,9 @@ function mapMessageToBrief(
       : null,
     body_text: message.snippet?.trim() || null,
     has_attachments: false,
+    provider_message_id: message.id,
+    provider_thread_id: message.thread_id ?? null,
+    web_link: message.webLink ?? buildMessageUrl(source.provider, message),
     raw_ai_output: {
       ...asRecord(currentRawAiOutput),
       source_provider: provider,
@@ -200,6 +209,9 @@ function mapAnalysisToBrief(
     suggested_reply: analysis.suggested_reply || null,
     estimated_effort: importanceToEffort(analysis.importance_score),
     client: analysis.organizations[0] || null,
+    provider_message_id: message.id,
+    provider_thread_id: message.thread_id ?? null,
+    web_link: message.webLink ?? buildMessageUrl(source.provider, message),
     raw_ai_output: {
       ...analysis,
       source_provider: provider,
@@ -268,4 +280,31 @@ function formatParticipant(
   }
 
   return participant.name || participant.email || fallback;
+}
+
+function buildMessageUrl(
+  provider: string | undefined,
+  message: { id: string },
+): string | null {
+  if (message.id.startsWith("calendar:")) {
+    switch (normalizeProvider(provider)) {
+      case "google":
+        return "https://calendar.google.com/calendar/u/0/r";
+      case "microsoft":
+        return "https://outlook.office.com/calendar/view/month";
+      default:
+        return null;
+    }
+  }
+
+  switch (normalizeProvider(provider)) {
+    case "google":
+      return `https://mail.google.com/mail/u/0/#all/${message.id}`;
+
+    case "microsoft":
+      return `https://outlook.office.com/mail/deeplink/read/${encodeURIComponent(message.id)}`;
+
+    default:
+      return null;
+  }
 }

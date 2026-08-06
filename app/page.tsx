@@ -1,14 +1,11 @@
 import AppLayout from "@/components/layout/AppLayout";
 import DashboardCard from "@/components/dashboard/DashboardCard";
+import SyncAccountsButton from "@/components/dashboard/SyncAccountsButton";
+import DashboardRealtimeRefresh from "@/components/dashboard/DashboardRealtimeRefresh";
 import {
-  listUpcomingEvents,
-  mapEventToExecutiveBriefInput,
-} from "@/lib/connectors/calendar/nylas/events";
-import {
-  listRecentMessages,
-  NylasMessage,
-} from "@/lib/connectors/email/nylas/messages";
-import { syncNylasMessagesToSupabase } from "@/lib/connectors/email/sync";
+  connectedProviderName,
+  getConnectedAccounts,
+} from "@/lib/connectors/connected-accounts";
 import { createClient } from "@supabase/supabase-js";
 import { cookies } from "next/headers";
 import Link from "next/link";
@@ -20,6 +17,7 @@ type HomeProps = {
     email?: string;
     provider?: string;
     message?: string;
+    view?: string;
   }>;
 };
 
@@ -35,6 +33,10 @@ type BriefRow = {
   recipients: string | null;
   priority: string | null;
   category: string | null;
+  completed_at: string | null;
+  snooze_until: string | null;
+  pinned: boolean;
+  web_link: string | null;
   executive_summary: string | null;
   body_text: string | null;
   action_items: string | null;
@@ -52,12 +54,6 @@ type AiMetadata = {
   source_type?: string;
 };
 
-type ConnectedAccount = {
-  provider: "google" | "microsoft";
-  grantId: string;
-  email?: string;
-};
-
 type MeetingBrief = {
   id: string;
   title: string;
@@ -68,13 +64,13 @@ type MeetingBrief = {
   sourceAccount?: string;
 };
 
-const SYNC_MESSAGE_LIMIT = 50;
-const SYNC_EVENT_LIMIT = 50;
 const DISPLAY_BRIEF_LIMIT = 50;
 const USER_TIME_ZONE = "America/Detroit";
 
 export default async function Home({ searchParams }: HomeProps) {
   const params = await searchParams;
+  const showingCompleted = params.view === "completed";
+  const showingSnoozed = params.view === "snoozed";
   const cookieStore = await cookies();
   const accounts = getConnectedAccounts(cookieStore);
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
@@ -84,62 +80,8 @@ export default async function Home({ searchParams }: HomeProps) {
 
   let briefs: ExecutiveEmail[] = [];
   let todayMeetings: MeetingBrief[] = [];
-  let syncError: string | null = null;
-  let syncMessage: string | null = null;
-  const liveItems: Array<{
-    item: NylasMessage;
-    provider: string;
-    account?: string;
-  }> = [];
-
-  if (accounts.length > 0) {
-    const summaries: string[] = [];
-
-    for (const account of accounts) {
-      try {
-        const [messages, events] = await Promise.all([
-          listRecentMessages(account.grantId, SYNC_MESSAGE_LIMIT),
-          listUpcomingEvents(account.grantId, { limit: SYNC_EVENT_LIMIT }),
-        ]);
-        const calendarItems = events.map(mapEventToExecutiveBriefInput);
-        const items = [...messages, ...calendarItems];
-
-        liveItems.push(
-          ...items.map((item) => ({
-            item,
-            provider: account.provider,
-            account: account.email,
-          })),
-        );
-
-        const result = await syncNylasMessagesToSupabase(supabase, items, {
-          provider: account.provider,
-          account: account.email,
-          grantId: account.grantId,
-        });
-
-        summaries.push(
-          `${providerName(account.provider)}: ${messages.length} email(s), ${calendarItems.length} event(s), ${result.analyzed} AI-analyzed`,
-        );
-
-        if (result.analysisFailed > 0) {
-          summaries.push(
-            `${providerName(account.provider)}: ${result.analysisFailed} AI analysis attempt(s) failed`,
-          );
-        }
-      } catch (error) {
-        const message =
-          error instanceof Error
-            ? error.message
-            : `Unable to synchronize ${providerName(account.provider)}.`;
-        syncError = syncError ? `${syncError} ${message}` : message;
-      }
-    }
-
-    if (summaries.length > 0) {
-      syncMessage = summaries.join(" · ");
-    }
-  }
+  let dashboardError: string | null = null;
+  let statusCounts = { open: 0, snoozed: 0, completed: 0 };
 
   const { data, error } = await supabase
     .from("executive_briefs")
@@ -149,9 +91,25 @@ export default async function Home({ searchParams }: HomeProps) {
     .limit(200);
 
   if (error) {
-    syncError = syncError ?? error.message;
+    dashboardError = error.message;
   } else {
-    const rows = (data ?? []) as BriefRow[];
+    const now = getCurrentTimestamp();
+    const relevantRows = ((data ?? []) as BriefRow[]).filter(shouldShowBrief);
+    statusCounts = relevantRows.reduce(
+      (counts, row) => {
+        if (row.completed_at) counts.completed += 1;
+        else if (dateValue(row.snooze_until) > now) counts.snoozed += 1;
+        else counts.open += 1;
+        return counts;
+      },
+      { open: 0, snoozed: 0, completed: 0 },
+    );
+    const rows = relevantRows.filter((row) => {
+      if (showingCompleted) return Boolean(row.completed_at);
+      if (row.completed_at) return false;
+      const snoozeTime = dateValue(row.snooze_until);
+      return showingSnoozed ? snoozeTime > now : snoozeTime <= now;
+    });
 
     todayMeetings = rows
       .filter(
@@ -172,25 +130,17 @@ export default async function Home({ searchParams }: HomeProps) {
       }));
 
     briefs = rows
-      .filter(shouldShowBrief)
       .sort(compareExecutivePriority)
       .slice(0, DISPLAY_BRIEF_LIMIT)
       .map(mapBriefRow);
   }
 
-  if (briefs.length === 0 && liveItems.length > 0) {
-    briefs = liveItems
-      .map(({ item, provider, account }) =>
-        mapNylasItem(item, provider, account),
-      )
-      .sort(compareExecutiveEmails);
-  }
-
   return (
     <AppLayout>
+      <DashboardRealtimeRefresh />
       <section className="mb-8 rounded-xl border border-slate-700 bg-slate-800 p-6">
-        <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
-          <div>
+        <div className="flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between">
+          <div className="min-w-0">
             <p className="text-sm font-semibold uppercase tracking-wider text-blue-400">
               Connected work accounts
             </p>
@@ -206,7 +156,7 @@ export default async function Home({ searchParams }: HomeProps) {
                     key={`${account.provider}:${account.grantId}`}
                     className="rounded-full border border-slate-600 bg-slate-900 px-3 py-1 text-sm text-slate-200"
                   >
-                    {providerName(account.provider)}
+                    {connectedProviderName(account.provider)}
                     {account.email ? ` · ${account.email}` : ""}
                   </span>
                 ))}
@@ -217,14 +167,9 @@ export default async function Home({ searchParams }: HomeProps) {
               </p>
             )}
           </div>
-          <div className="flex flex-col gap-3 sm:flex-row">
+          <div className="grid w-full gap-3 sm:grid-cols-2 xl:w-auto xl:grid-cols-3">
             {accounts.length > 0 && (
-              <a
-                href="/"
-                className="rounded-lg border border-slate-500 px-5 py-3 text-center font-semibold text-white hover:bg-slate-700"
-              >
-                Sync all accounts
-              </a>
+              <SyncAccountsButton />
             )}
             <a
               href="/api/auth/nylas/connect?provider=google"
@@ -252,16 +197,26 @@ export default async function Home({ searchParams }: HomeProps) {
           {params.email ? `: ${params.email}` : ""}.
         </div>
       )}
-      {syncMessage && !syncError && (
-        <div className="mb-8 rounded-xl border border-green-700 bg-green-950 p-4 text-green-200">
-          Synchronization complete: {syncMessage}
-        </div>
-      )}
-      {(params.nylas === "error" || syncError) && (
+      {(params.nylas === "error" || dashboardError) && (
         <div className="mb-8 rounded-xl border border-red-700 bg-red-950 p-4 text-red-200">
-          {syncError ?? params.message ?? "Unknown connection error."}
+          {dashboardError ?? params.message ?? "Unknown connection error."}
         </div>
       )}
+
+      <nav
+        aria-label="Brief queue"
+        className="mb-8 flex flex-wrap gap-2 rounded-xl border border-slate-700 bg-slate-800 p-3"
+      >
+        <StatusLink href="/" active={!showingCompleted && !showingSnoozed}>
+          Open ({statusCounts.open})
+        </StatusLink>
+        <StatusLink href="/?view=snoozed" active={showingSnoozed}>
+          Snoozed ({statusCounts.snoozed})
+        </StatusLink>
+        <StatusLink href="/?view=completed" active={showingCompleted}>
+          Completed ({statusCounts.completed})
+        </StatusLink>
+      </nav>
 
       <div className="mb-8 grid grid-cols-1 gap-6 sm:grid-cols-2 xl:grid-cols-4">
         <MetricCard
@@ -331,15 +286,33 @@ export default async function Home({ searchParams }: HomeProps) {
       </section>
 
       <div className="mb-6">
-        <h2 className="text-3xl font-bold text-white">Needs Your Attention</h2>
-        <p className="mt-1 text-sm text-slate-400">
-          Low-value messages are stored but suppressed by the Executive Relevance Engine.
-        </p>
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div>
+            <h2 className="text-3xl font-bold text-white">
+              {showingCompleted
+                ? "Completed Briefs"
+                : showingSnoozed
+                  ? "Snoozed Briefs"
+                  : "Needs Your Attention"}
+            </h2>
+            <p className="mt-1 text-sm text-slate-400">
+              {showingCompleted
+                ? "Completed items are retained for reference and can be restored."
+                : showingSnoozed
+                  ? "These briefs will return to the open queue automatically."
+                  : "Low-value messages are stored but suppressed by the Executive Relevance Engine."}
+            </p>
+          </div>
+        </div>
       </div>
 
-      {!syncError && briefs.length === 0 && (
+      {!dashboardError && briefs.length === 0 && (
         <div className="rounded-xl border border-slate-700 bg-slate-800 p-6 text-slate-300">
-          No relevant Executive Briefs are waiting for your attention.
+          {showingCompleted
+            ? "No completed Executive Briefs."
+            : showingSnoozed
+              ? "No Executive Briefs are currently snoozed."
+              : "No relevant Executive Briefs are waiting for your attention."}
         </div>
       )}
       <div className="space-y-5">
@@ -349,46 +322,6 @@ export default async function Home({ searchParams }: HomeProps) {
       </div>
     </AppLayout>
   );
-}
-
-function getConnectedAccounts(cookieStore: Awaited<ReturnType<typeof cookies>>) {
-  const accounts: ConnectedAccount[] = [];
-  const googleGrantId = cookieStore.get("nylas_google_grant_id")?.value;
-  const microsoftGrantId = cookieStore.get("nylas_microsoft_grant_id")?.value;
-
-  if (googleGrantId) {
-    accounts.push({
-      provider: "google",
-      grantId: googleGrantId,
-      email: cookieStore.get("nylas_google_account_email")?.value,
-    });
-  }
-
-  if (microsoftGrantId) {
-    accounts.push({
-      provider: "microsoft",
-      grantId: microsoftGrantId,
-      email: cookieStore.get("nylas_microsoft_account_email")?.value,
-    });
-  }
-
-  // Backward compatibility for an account connected before provider-specific
-  // cookies were introduced.
-  if (accounts.length === 0) {
-    const grantId = cookieStore.get("nylas_grant_id")?.value;
-    const provider = normalizeProvider(
-      cookieStore.get("nylas_account_provider")?.value,
-    );
-    if (grantId && provider !== "unknown") {
-      accounts.push({
-        provider,
-        grantId,
-        email: cookieStore.get("nylas_account_email")?.value,
-      });
-    }
-  }
-
-  return accounts;
 }
 
 function mapBriefRow(row: BriefRow): ExecutiveEmail {
@@ -412,6 +345,11 @@ function mapBriefRow(row: BriefRow): ExecutiveEmail {
     sourceAccount:
       row.source_account ?? metadata.source_account ?? undefined,
     sourceType: calendar ? "calendar" : "email",
+    receivedAt: row.received_at ?? undefined,
+    completedAt: row.completed_at ?? undefined,
+    snoozeUntil: row.snooze_until ?? undefined,
+    pinned: row.pinned,
+    webLink: row.web_link ?? undefined,
     executiveScore:
       typeof metadata.importance_score === "number"
         ? metadata.importance_score
@@ -429,6 +367,9 @@ function shouldShowBrief(row: BriefRow) {
 }
 
 function compareExecutivePriority(a: BriefRow, b: BriefRow) {
+  const pinDifference = Number(b.pinned) - Number(a.pinned);
+  if (pinDifference !== 0) return pinDifference;
+
   const scoreDifference =
     getImportanceScore(b.raw_ai_output) - getImportanceScore(a.raw_ai_output);
   if (scoreDifference !== 0) return scoreDifference;
@@ -457,27 +398,6 @@ function getImportanceScore(rawAiOutput: unknown) {
   return typeof score === "number" && Number.isFinite(score) ? score : -1;
 }
 
-function mapNylasItem(
-  item: NylasMessage,
-  provider?: string,
-  account?: string,
-): ExecutiveEmail {
-  const sender = item.from?.[0];
-  const calendar = isCalendarBrief(item.id);
-  return {
-    id: item.id,
-    subject: item.subject || (calendar ? "Untitled meeting" : "No subject"),
-    sender: sender?.name || sender?.email || "Unknown sender",
-    priority: item.starred ? "High" : "Low",
-    category: calendar ? "Calendar" : "Awaiting AI analysis",
-    summary: item.snippet?.trim() || "Open this item to view its contents.",
-    actionRequired: false,
-    sourceProvider: normalizeProvider(provider),
-    sourceAccount: account,
-    sourceType: calendar ? "calendar" : "email",
-  };
-}
-
 function sourceLabel(providerValue: string | null | undefined, calendar: boolean) {
   const provider = normalizeProvider(providerValue);
   if (provider === "google") return calendar ? "Google Calendar" : "Gmail";
@@ -485,10 +405,6 @@ function sourceLabel(providerValue: string | null | undefined, calendar: boolean
     return calendar ? "Outlook Calendar" : "Outlook";
   }
   return calendar ? "Calendar" : "Email";
-}
-
-function providerName(provider: ConnectedAccount["provider"]) {
-  return provider === "google" ? "Google" : "Outlook";
 }
 
 function normalizeProvider(
@@ -500,10 +416,6 @@ function normalizeProvider(
     return "microsoft";
   }
   return "unknown";
-}
-
-function compareExecutiveEmails(a: ExecutiveEmail, b: ExecutiveEmail) {
-  return priorityWeight(b.priority) - priorityWeight(a.priority);
 }
 
 function priorityWeight(priority: string | null) {
@@ -565,6 +477,34 @@ function MetricCard({
 
 function countPriority(briefs: ExecutiveEmail[], priority: string) {
   return briefs.filter((brief) => brief.priority === priority).length;
+}
+
+function getCurrentTimestamp() {
+  return Date.now();
+}
+
+function StatusLink({
+  href,
+  active,
+  children,
+}: {
+  href: string;
+  active: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <Link
+      href={href}
+      aria-current={active ? "page" : undefined}
+      className={`rounded-lg border px-4 py-2 text-sm font-semibold transition ${
+        active
+          ? "border-blue-500 bg-blue-950 text-blue-200"
+          : "border-slate-600 text-slate-200 hover:border-blue-500 hover:text-white"
+      }`}
+    >
+      {children}
+    </Link>
+  );
 }
 
 function normalizePriority(
