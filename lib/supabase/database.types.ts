@@ -18,6 +18,7 @@ export type Database = {
           body_text: string | null;
           category: string | null;
           client: string | null;
+          completed_at: string | null;
           created_at: string;
           deadline: string | null;
           decisions_required: string | null;
@@ -25,12 +26,14 @@ export type Database = {
           executive_summary: string | null;
           has_attachments: boolean;
           id: string;
+          pinned: boolean;
           priority: string | null;
           raw_ai_output: Json | null;
           received_at: string | null;
           recipients: string | null;
           risks: string | null;
           sender: string | null;
+          snooze_until: string | null;
           source_message_id: string | null;
           subject: string | null;
           suggested_reply: string | null;
@@ -40,6 +43,7 @@ export type Database = {
           body_text?: string | null;
           category?: string | null;
           client?: string | null;
+          completed_at?: string | null;
           created_at?: string;
           deadline?: string | null;
           decisions_required?: string | null;
@@ -47,12 +51,14 @@ export type Database = {
           executive_summary?: string | null;
           has_attachments?: boolean;
           id?: string;
+          pinned?: boolean;
           priority?: string | null;
           raw_ai_output?: Json | null;
           received_at?: string | null;
           recipients?: string | null;
           risks?: string | null;
           sender?: string | null;
+          snooze_until?: string | null;
           source_message_id?: string | null;
           subject?: string | null;
           suggested_reply?: string | null;
@@ -62,6 +68,7 @@ export type Database = {
           body_text?: string | null;
           category?: string | null;
           client?: string | null;
+          completed_at?: string | null;
           created_at?: string;
           deadline?: string | null;
           decisions_required?: string | null;
@@ -69,12 +76,14 @@ export type Database = {
           executive_summary?: string | null;
           has_attachments?: boolean;
           id?: string;
+          pinned?: boolean;
           priority?: string | null;
           raw_ai_output?: Json | null;
           received_at?: string | null;
           recipients?: string | null;
           risks?: string | null;
           sender?: string | null;
+          snooze_until?: string | null;
           source_message_id?: string | null;
           subject?: string | null;
           suggested_reply?: string | null;
