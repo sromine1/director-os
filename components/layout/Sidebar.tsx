@@ -1,13 +1,15 @@
+import Link from "next/link";
+
 export default function Sidebar() {
   const items = [
-    "Dashboard",
-    "Executive Inbox",
-    "Meetings",
-    "Decisions",
-    "Action Items",
-    "Executive Dashboard",
-    "AI Assistant",
-    "Settings",
+    { label: "Dashboard", href: "/" },
+    { label: "Executive Timeline", href: "/timeline" },
+    { label: "Executive Inbox" },
+    { label: "Meetings" },
+    { label: "Decisions" },
+    { label: "Action Items" },
+    { label: "AI Assistant" },
+    { label: "Settings" },
   ];
 
   return (
@@ -23,14 +25,26 @@ export default function Sidebar() {
       </div>
 
       <nav className="px-4 mt-8">
-        {items.map((item) => (
-          <button
-            key={item}
-            className="w-full text-left px-4 py-3 rounded-lg mb-2 text-slate-300 hover:bg-slate-800 hover:text-white transition"
-          >
-            {item}
-          </button>
-        ))}
+        {items.map((item) =>
+          item.href ? (
+            <Link
+              key={item.label}
+              href={item.href}
+              className="mb-2 block w-full rounded-lg px-4 py-3 text-left text-slate-300 transition hover:bg-slate-800 hover:text-white"
+            >
+              {item.label}
+            </Link>
+          ) : (
+            <button
+              key={item.label}
+              type="button"
+              disabled
+              className="mb-2 w-full cursor-not-allowed rounded-lg px-4 py-3 text-left text-slate-500"
+            >
+              {item.label}
+            </button>
+          ),
+        )}
       </nav>
     </aside>
   );
