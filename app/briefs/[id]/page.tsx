@@ -1,7 +1,7 @@
 import BriefMetadata from "@/components/briefs/BriefMetadata";
 import BriefSection from "@/components/briefs/BriefSection";
 import PriorityBadge from "@/components/dashboard/PriorityBadge";
-import { formatBriefDate, getBriefAiMetadata, isMeetingBrief, type BriefDetail, type RelatedBrief } from "@/lib/executive-brief-detail";
+import { findRelatedBriefs, formatBriefDate, getBriefAiMetadata, isMeetingBrief, type BriefDetail, type RelatedBrief } from "@/lib/executive-brief-detail";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -68,15 +68,19 @@ export default async function BriefPage(props: PageProps<"/briefs/[id]">) {
 }
 
 async function loadRelatedBriefs(supabase: SupabaseClient, brief: BriefDetail) {
-  let query = supabase.from("executive_briefs").select("id, subject, priority, received_at, source_type").neq("id", brief.id).order("received_at", { ascending: false }).limit(4);
+  const { data, error } = await supabase
+    .from("executive_briefs")
+    .select("id, subject, sender, recipients, priority, received_at, source_type, source_account, client, raw_ai_output")
+    .neq("id", brief.id)
+    .order("received_at", { ascending: false })
+    .limit(250);
 
-  if (brief.client) query = query.eq("client", brief.client);
-  else if (brief.source_account) query = query.eq("source_account", brief.source_account);
-  else if (brief.source_provider) query = query.eq("source_provider", brief.source_provider);
-  else return [];
+  if (error) {
+    console.error("Unable to load related intelligence candidates:", error.message);
+    return [];
+  }
 
-  const { data } = await query;
-  return (data ?? []) as RelatedBrief[];
+  return findRelatedBriefs(brief, (data ?? []) as BriefDetail[]);
 }
 
 function IntelligenceEntities({ ai }: { ai: ReturnType<typeof getBriefAiMetadata> }) {
@@ -107,15 +111,27 @@ function IntelligenceEntities({ ai }: { ai: ReturnType<typeof getBriefAiMetadata
 function RelatedItems({ items }: { items: RelatedBrief[] }) {
   return (
     <section className="rounded-xl border border-slate-800 bg-slate-900 p-6">
-      <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-400">Related items</h2>
+      <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-400">Related intelligence</h2>
       {items.length === 0 ? (
-        <p className="mt-4 text-sm text-slate-400">No related items were found for this client or account.</p>
+        <p className="mt-4 text-sm text-slate-400">No strong relationships were found in the synchronized briefs.</p>
       ) : (
         <div className="mt-4 divide-y divide-slate-800">
           {items.map((item) => (
-            <Link key={item.id} href={`/briefs/${item.id}`} className="flex items-center justify-between gap-4 py-4 hover:text-blue-300">
-              <div><p className="font-medium">{item.subject || "Untitled item"}</p><p className="mt-1 text-xs text-slate-500">{formatBriefDate(item.received_at)}</p></div>
-              <span className="text-xs text-slate-500">{item.source_type === "calendar" ? "Meeting" : item.priority || "Brief"}</span>
+            <Link key={item.id} href={`/briefs/${item.id}`} className="block py-4 hover:text-blue-300">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <p className="font-medium">{item.subject || "Untitled item"}</p>
+                  <p className="mt-1 text-xs text-slate-500">{formatBriefDate(item.received_at)}</p>
+                </div>
+                <span className="shrink-0 text-xs text-slate-500">{item.source_type === "calendar" ? "Meeting" : item.priority || "Brief"}</span>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {item.reasons.map((reason) => (
+                  <span key={reason} className="rounded-full bg-slate-800 px-2.5 py-1 text-xs text-slate-300">
+                    {reason}
+                  </span>
+                ))}
+              </div>
             </Link>
           ))}
         </div>
