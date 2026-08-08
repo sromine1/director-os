@@ -4,6 +4,7 @@ export default function Sidebar() {
   const items = [
     { label: "Dashboard", href: "/" },
     { label: "Executive Timeline", href: "/timeline" },
+    { label: "Search", href: "/search" },
     { label: "Executive Inbox" },
     { label: "Meetings" },
     { label: "Decisions" },
